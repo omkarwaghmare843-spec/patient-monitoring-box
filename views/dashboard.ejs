@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <%- include('partials/head') %>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+</head>
+<body>
+  <div class="app-shell" id="appShell">
+    <%- include('partials/sidebar') %>
+
+    <main class="main-content">
+      <div class="topbar">
+        <div>
+          <h1>Checkup Dashboard</h1>
+          <p class="text-muted">Connect to the HealthBox and start a live checkup.</p>
+        </div>
+      </div>
+
+      <!-- Connection panel -->
+      <div class="card connect-panel">
+        <div class="connect-status">
+          <span class="status-dot" id="statusDot"></span>
+          <div class="status-text">
+            <strong id="statusTitle">Not Connected</strong>
+            <span id="statusSubtitle">Tap "Connect" to pair with your HealthBox device</span>
+          </div>
+        </div>
+        <div class="connect-actions">
+          <button class="btn btn-primary" id="connectBtn">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 6.5l11 11L12 23V12L6.5 17.5v-11L12 1v11l5.5-5.5"/></svg>
+            Connect to HealthBox
+          </button>
+          <button class="btn btn-danger" id="disconnectBtn" hidden>Disconnect</button>
+          <button class="btn btn-secondary" id="saveBtn" disabled>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+            Save Checkup
+          </button>
+        </div>
+      </div>
+
+      <!-- Vitals grid -->
+      <div class="vitals-grid">
+        <div class="vital-card vc-temp">
+          <div class="vital-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4v10.5a4 4 0 1 1-4 0V4a2 2 0 0 1 4 0Z"/></svg>
+          </div>
+          <div class="vital-label">Temperature</div>
+          <div class="vital-value"><span id="val-temp">--</span><span class="unit">°C</span></div>
+          <div class="vital-range" id="badge-temp"><span class="badge badge-neutral">No data</span></div>
+        </div>
+
+        <div class="vital-card vc-hr">
+          <div class="vital-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.6l-1-1a5.5 5.5 0 0 0-7.8 7.8l1 1L12 21l7.8-7.6 1-1a5.5 5.5 0 0 0 0-7.8Z"/></svg>
+          </div>
+          <div class="vital-label">Heart Rate</div>
+          <div class="vital-value"><span id="val-hr">--</span><span class="unit">bpm</span></div>
+          <div class="vital-range" id="badge-hr"><span class="badge badge-neutral">No data</span></div>
+        </div>
+
+        <div class="vital-card vc-spo2">
+          <div class="vital-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2s6 7.5 6 12a6 6 0 0 1-12 0c0-4.5 6-12 6-12Z"/></svg>
+          </div>
+          <div class="vital-label">SpO&#8322;</div>
+          <div class="vital-value"><span id="val-spo2">--</span><span class="unit">%</span></div>
+          <div class="vital-range" id="badge-spo2"><span class="badge badge-neutral">No data</span></div>
+        </div>
+
+        <div class="vital-card vc-ecg">
+          <div class="vital-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="2 12 7 12 9 6 13 18 15 12 22 12"/></svg>
+          </div>
+          <div class="vital-label">ECG</div>
+          <div class="vital-value"><span id="val-ecg">--</span><span class="unit">mV</span></div>
+          <div class="vital-range" id="badge-ecg"><span class="badge badge-neutral">No data</span></div>
+        </div>
+
+        <div class="vital-card vc-emg">
+          <div class="vital-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h3l2-7 4 14 3-10 2 3h4"/></svg>
+          </div>
+          <div class="vital-label">EMG</div>
+          <div class="vital-value"><span id="val-emg">--</span><span class="unit">&micro;V</span></div>
+          <div class="vital-range" id="badge-emg"><span class="badge badge-neutral">No data</span></div>
+        </div>
+      </div>
+
+      <h3 class="section-title">Live Trends</h3>
+      <div class="chart-grid">
+        <div class="card chart-card">
+          <div class="card-header"><h3>Heart Rate</h3></div>
+          <canvas id="chart-hr"></canvas>
+        </div>
+        <div class="card chart-card">
+          <div class="card-header"><h3>SpO&#8322;</h3></div>
+          <canvas id="chart-spo2"></canvas>
+        </div>
+        <div class="card chart-card">
+          <div class="card-header"><h3>ECG Waveform</h3></div>
+          <canvas id="chart-ecg"></canvas>
+        </div>
+        <div class="card chart-card">
+          <div class="card-header"><h3>EMG Signal</h3></div>
+          <canvas id="chart-emg"></canvas>
+        </div>
+        <div class="card chart-card">
+          <div class="card-header"><h3>Temperature</h3></div>
+          <canvas id="chart-temp"></canvas>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script type="module" src="/js/dashboard.js"></script>
+</body>
+</html>

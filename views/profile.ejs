@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <%- include('partials/head') %>
+</head>
+<body>
+  <div class="app-shell" id="appShell">
+    <%- include('partials/sidebar') %>
+
+    <main class="main-content">
+      <div class="topbar">
+        <div>
+          <h1>My Profile</h1>
+          <p class="text-muted">Manage your family member account details.</p>
+        </div>
+      </div>
+
+      <div class="form-error" id="formError">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="flex-shrink:0;margin-top:1px;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        <span id="formErrorText">Something went wrong.</span>
+      </div>
+      <div class="form-success" id="formSuccess">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="flex-shrink:0;margin-top:1px;"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+        <span id="formSuccessText">Saved.</span>
+      </div>
+
+      <div class="card" style="max-width:520px;">
+        <div class="card-header">
+          <h3>Account Details</h3>
+        </div>
+        <form id="profileForm">
+          <div class="field">
+            <label for="profileName">Full Name</label>
+            <input type="text" id="profileName" required />
+          </div>
+          <div class="field">
+            <label for="profileRelation">Relation / Role</label>
+            <select id="profileRelation">
+              <option value="Self">Self</option>
+              <option value="Parent">Parent</option>
+              <option value="Spouse">Spouse</option>
+              <option value="Child">Child</option>
+              <option value="Sibling">Sibling</option>
+              <option value="Grandparent">Grandparent</option>
+              <option value="Other">Other</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="profileEmail">Email</label>
+            <input type="email" id="profileEmail" disabled />
+            <div class="hint">Email cannot be changed here.</div>
+          </div>
+          <button type="submit" class="btn btn-primary" id="saveProfileBtn" style="width:auto;">Save Changes</button>
+        </form>
+      </div>
+    </main>
+  </div>
+
+  <script type="module" src="/js/profile.js"></script>
+</body>
+</html>

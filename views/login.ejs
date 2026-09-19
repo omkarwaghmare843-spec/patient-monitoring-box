@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <%- include('partials/head') %>
+</head>
+<body>
+  <div class="auth-shell">
+    <div class="auth-card">
+      <div class="auth-brand">
+        <div class="logo-mark">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l2 8 4-16 2 8h6"/></svg>
+        </div>
+        <div class="brand-text">
+          <h1>HealthBox</h1>
+          <span>Family Health Monitoring</span>
+        </div>
+      </div>
+
+      <div class="tabs">
+        <button class="tab-btn active" data-tab="signin">Sign In</button>
+        <button class="tab-btn" data-tab="signup">Create Account</button>
+      </div>
+
+      <div class="form-error" id="formError">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="flex-shrink:0;margin-top:1px;"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        <span id="formErrorText">Something went wrong.</span>
+      </div>
+      <div class="form-success" id="formSuccess">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="flex-shrink:0;margin-top:1px;"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+        <span id="formSuccessText">Success.</span>
+      </div>
+
+      <!-- Sign In -->
+      <div class="tab-panel active" id="panel-signin">
+        <p class="subtitle">Sign in with your family member account to start a checkup.</p>
+        <form id="signinForm">
+          <div class="field">
+            <label for="signinEmail">Email</label>
+            <input type="email" id="signinEmail" placeholder="you@family.com" required autocomplete="email" />
+          </div>
+          <div class="field">
+            <label for="signinPassword">Password</label>
+            <input type="password" id="signinPassword" placeholder="••••••••" required autocomplete="current-password" />
+          </div>
+          <button type="submit" class="btn btn-primary" id="signinBtn">
+            <span class="btn-label">Sign In</span>
+          </button>
+        </form>
+      </div>
+
+      <!-- Sign Up -->
+      <div class="tab-panel" id="panel-signup">
+        <p class="subtitle">Add a new family member profile to this HealthBox.</p>
+        <form id="signupForm">
+          <div class="field">
+            <label for="signupName">Full Name</label>
+            <input type="text" id="signupName" placeholder="e.g. Ramesh Waghmare" required autocomplete="name" />
+          </div>
+          <div class="field">
+            <label for="signupRelation">Relation / Role</label>
+            <select id="signupRelation">
+              <option value="Self">Self</option>
+              <option value="Parent">Parent</option>
+              <option value="Spouse">Spouse</option>
+              <option value="Child">Child</option>
+              <option value="Sibling">Sibling</option>
+              <option value="Grandparent">Grandparent</option>
+              <option value="Other">Other</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="signupEmail">Email</label>
+            <input type="email" id="signupEmail" placeholder="you@family.com" required autocomplete="email" />
+          </div>
+          <div class="field">
+            <label for="signupPassword">Password</label>
+            <input type="password" id="signupPassword" placeholder="At least 6 characters" required minlength="6" autocomplete="new-password" />
+            <div class="hint">Used only to sign in to this app — not shared with anyone.</div>
+          </div>
+          <button type="submit" class="btn btn-primary" id="signupBtn">
+            <span class="btn-label">Create Account</span>
+          </button>
+        </form>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="/js/auth-page.js"></script>
+</body>
+</html>
