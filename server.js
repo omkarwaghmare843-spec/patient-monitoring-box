@@ -39,6 +39,10 @@ app.use((req, res) => {
   res.status(404).render('404', { title: 'Page Not Found' });
 });
 
-app.listen(PORT, () => {
-  console.log(`Patient monitoring UI running at http://localhost:${PORT}`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Patient monitoring UI running at http://localhost:${PORT}`);
+  });
+}
+
+module.exports = app;
