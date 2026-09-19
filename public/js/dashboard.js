@@ -41,6 +41,10 @@ const chartDefaults = {
 };
 
 function makeChart(canvasId, color, softColor) {
+  if (typeof Chart === 'undefined') {
+    console.error('Chart.js failed to load; live trend charts are disabled.');
+    return null;
+  }
   const ctx = document.getElementById(canvasId).getContext('2d');
   return new Chart(ctx, {
     type: 'line',
@@ -61,6 +65,7 @@ const charts = {
 };
 
 function pushPoint(chart, value) {
+  if (!chart) return;
   const ds = chart.data.datasets[0];
   chart.data.labels.push('');
   ds.data.push(value);

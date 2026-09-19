@@ -18,6 +18,10 @@ const chartOptions = {
 };
 
 function makeTrendChart(canvasId, color, softColor) {
+  if (typeof Chart === 'undefined') {
+    console.error('Chart.js failed to load; trend charts are disabled.');
+    return null;
+  }
   const ctx = document.getElementById(canvasId).getContext('2d');
   return new Chart(ctx, {
     type: 'line',
@@ -84,17 +88,23 @@ requireAuth(async (user) => {
       return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
     });
 
-    trendHr.data.labels = labels;
-    trendHr.data.datasets[0].data = chrono.map((r) => r.heartRate);
-    trendHr.update();
+    if (trendHr) {
+      trendHr.data.labels = labels;
+      trendHr.data.datasets[0].data = chrono.map((r) => r.heartRate);
+      trendHr.update();
+    }
 
-    trendSpo2.data.labels = labels;
-    trendSpo2.data.datasets[0].data = chrono.map((r) => r.spo2);
-    trendSpo2.update();
+    if (trendSpo2) {
+      trendSpo2.data.labels = labels;
+      trendSpo2.data.datasets[0].data = chrono.map((r) => r.spo2);
+      trendSpo2.update();
+    }
 
-    trendTemp.data.labels = labels;
-    trendTemp.data.datasets[0].data = chrono.map((r) => r.temperature);
-    trendTemp.update();
+    if (trendTemp) {
+      trendTemp.data.labels = labels;
+      trendTemp.data.datasets[0].data = chrono.map((r) => r.temperature);
+      trendTemp.update();
+    }
   } catch (err) {
     console.error('Failed to load history:', err);
     tableCard.querySelector('.table-wrap').hidden = true;
