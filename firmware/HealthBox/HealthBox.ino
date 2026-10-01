@@ -184,12 +184,21 @@ bool setupMax30100() {
     return false;
   }
 
-  max30100WriteReg(MAX30100_REG_MODE_CONFIG, 0x03);       // SpO2 + HR mode
-  max30100WriteReg(MAX30100_REG_SPO2_CONFIG, 0x47);       // hi-res, 100Hz, 1600us pulse
-  max30100WriteReg(MAX30100_REG_LED_CONFIG, 0x2F);        // IR/Red current ~7.6mA each
   max30100WriteReg(MAX30100_REG_FIFO_WR_PTR, 0x00);
   max30100WriteReg(MAX30100_REG_FIFO_OVF_CTR, 0x00);
   max30100WriteReg(MAX30100_REG_FIFO_RD_PTR, 0x00);
+  max30100WriteReg(MAX30100_REG_SPO2_CONFIG, 0x47);       // hi-res, 100Hz, 1600us pulse
+  max30100WriteReg(MAX30100_REG_LED_CONFIG, 0x2F);        // IR/Red current ~7.6mA each
+  delay(10);
+  max30100WriteReg(MAX30100_REG_MODE_CONFIG, 0x03);       // SpO2 + HR mode, written last so sampling starts after everything else is configured
+  delay(50);
+
+#ifdef MAX30100_DEBUG
+  Serial.printf("[MAX30100] readback MODE_CONFIG=0x%02X SPO2_CONFIG=0x%02X LED_CONFIG=0x%02X\n",
+    max30100ReadReg(MAX30100_REG_MODE_CONFIG),
+    max30100ReadReg(MAX30100_REG_SPO2_CONFIG),
+    max30100ReadReg(MAX30100_REG_LED_CONFIG));
+#endif
 
   Serial.println("MAX30100 initialized.");
   return true;
