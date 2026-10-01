@@ -15,18 +15,24 @@
     SW1 / SW2 .......................... EN / BOOT (board reset+flash, no firmware handling needed)
 
   The MAX30100 is driven with a small direct-register driver in this sketch
-  instead of an Arduino library, because:
-   - "MAX30100lib" hardcodes a call to the global Wire instance inside
-     begin() with no way to pass a custom TwoWire bus - it physically cannot
-     talk to a sensor wired to a second I2C bus.
-   - The SparkFun MAX3010x library (MAX30105.h) does support a custom bus,
-     but its register map/init sequence targets the MAX30102/MAX30105 and
-     failed to detect this board's actual MAX30100 chip during testing.
-  Reading the FIFO and computing HR/SpO2 directly here (zero-crossing HR
-  detection + ratio-of-ratios SpO2, same approach used in a previously
-  working MAX30102 project) avoids both limitations and is the version
-  confirmed working against this hardware (FIFO fills, part ID reads back
-  correctly) via firmware/MAX30100_Test/MAX30100_Test.ino.
+  instead of an Arduino library, because both available libraries hardcode
+  a call to the global Wire instance inside begin() with no way to pass a
+  custom TwoWire bus - they physically cannot talk to a sensor wired to a
+  second I2C bus (which this board requires, since the OLED already
+  occupies the global bus on 21/22):
+   - "MAX30100lib" (oxullo/Arduino-MAX30100) - also hardcoded its internal
+     I2C clock to 400kHz, which corrupts reads on this hardware; fixed to
+     100kHz when testing, confirmed working standalone.
+   - The SparkFun MAX3010x library (MAX30105.h) targets the MAX30102/
+     MAX30105 register map and failed to even detect this board's MAX30100.
+
+  The init sequence (100kHz clock, SpO2+HR mode, hi-res 100Hz/1600us
+  config) and the HR/SpO2 algorithm below are ported directly from
+  oxullo/Arduino-MAX30100's internals (BeatDetector + DCRemover + 1-pole
+  Butterworth low-pass + log-ratio SpO2 lookup table), since that
+  algorithm was confirmed working (steady ~60-85bpm HR, ~94-97% SpO2)
+  against this exact sensor via firmware/MAX30100_Test/MAX30100_Test.ino
+  before being ported onto this sketch's own dedicated TwoWire(1) bus.
 
   ---------------------------------------------------------------------------
   BLE protocol (matches public/js/ble-service.js on the web app):
@@ -101,22 +107,160 @@ Adafruit_SSD1306 display(OLED_WIDTH, OLED_HEIGHT, &oledWire, OLED_RESET);
 TwoWire maxWire = TwoWire(1);
 bool max30100Online = false;
 
-// SpO2 / HR running state (same ratio-of-ratios + zero-crossing approach
-// proven on the MAX30102 reference project, adapted for MAX30100's FIFO).
-static double avgIr = 0, avgRed = 0;
-static double sumIrAc = 0, sumRedAc = 0;
-static int spo2SampleCount = 0;
-static const double DC_ALPHA = 0.95;
-static const int SPO2_WINDOW = 100;
-static float filteredSpo2 = 98.0;
-static const float SPO2_ALPHA = 0.85;
-
-static float filteredHr = 0;
-static const float HR_ALPHA = 0.30;
-static bool prevIrAcPositive = false;
-static unsigned long lastHrCrossMs = 0;
-
 #define FINGER_PRESENT_THRESHOLD  20000UL
+
+// ----------------------------- MAX30100 HR/SpO2 algorithm ------------------------------------
+// Ported from oxullo/Arduino-MAX30100 (MAX30100_BeatDetector / MAX30100_Filters /
+// MAX30100_SpO2Calculator), confirmed working against this sensor via
+// firmware/MAX30100_Test/MAX30100_Test.ino before being adapted to this sketch's own bus.
+
+// -- DC remover (one per LED channel) --
+struct DCRemover {
+  float alpha = 0.95f;
+  float dcw = 0;
+  float step(float x) {
+    float oldDcw = dcw;
+    dcw = x + alpha * dcw;
+    return dcw - oldDcw;
+  }
+};
+static DCRemover irDCRemover;
+static DCRemover redDCRemover;
+
+// -- 1-pole Butterworth low-pass, Fs=100Hz, Fc=6Hz (mirrors the library's FilterBuLp1) --
+struct LowPassFilter {
+  float v0 = 0, v1 = 0;
+  float step(float x) {
+    v0 = v1;
+    v1 = (2.452372752527856026e-1f * x) + (0.50952544949442879485f * v0);
+    return v0 + v1;
+  }
+};
+static LowPassFilter lpf;
+
+// -- Beat detector state machine --
+enum BeatState { BEAT_INIT, BEAT_WAITING, BEAT_FOLLOWING_SLOPE, BEAT_MAYBE_DETECTED, BEAT_MASKING };
+#define BEAT_INIT_HOLDOFF_MS        2000
+#define BEAT_MASKING_HOLDOFF_MS     200
+#define BEAT_BPFILTER_ALPHA         0.6f
+#define BEAT_MIN_THRESHOLD          20.0f
+#define BEAT_MAX_THRESHOLD          800.0f
+#define BEAT_STEP_RESILIENCY        30.0f
+#define BEAT_THRESHOLD_FALLOFF      0.3f
+#define BEAT_THRESHOLD_DECAY        0.99f
+#define BEAT_INVALID_READOUT_MS     2000
+#define BEAT_SAMPLE_PERIOD_MS       10
+
+static BeatState beatState = BEAT_INIT;
+static float beatThreshold = BEAT_MIN_THRESHOLD;
+static float beatPeriodMs = 0;
+static float beatLastMaxValue = 0;
+static uint32_t beatTsLastBeat = 0;
+
+void beatDecreaseThreshold() {
+  if (beatLastMaxValue > 0 && beatPeriodMs > 0) {
+    beatThreshold -= beatLastMaxValue * (1 - BEAT_THRESHOLD_FALLOFF) / (beatPeriodMs / BEAT_SAMPLE_PERIOD_MS);
+  } else {
+    beatThreshold *= BEAT_THRESHOLD_DECAY;
+  }
+  if (beatThreshold < BEAT_MIN_THRESHOLD) beatThreshold = BEAT_MIN_THRESHOLD;
+}
+
+bool beatCheckForBeat(float sample) {
+  bool beatDetected = false;
+
+  switch (beatState) {
+    case BEAT_INIT:
+      if (millis() > BEAT_INIT_HOLDOFF_MS) beatState = BEAT_WAITING;
+      break;
+
+    case BEAT_WAITING:
+      if (sample > beatThreshold) {
+        beatThreshold = min(sample, BEAT_MAX_THRESHOLD);
+        beatState = BEAT_FOLLOWING_SLOPE;
+      }
+      if (millis() - beatTsLastBeat > BEAT_INVALID_READOUT_MS) {
+        beatPeriodMs = 0;
+        beatLastMaxValue = 0;
+      }
+      beatDecreaseThreshold();
+      break;
+
+    case BEAT_FOLLOWING_SLOPE:
+      if (sample < beatThreshold) {
+        beatState = BEAT_MAYBE_DETECTED;
+      } else {
+        beatThreshold = min(sample, BEAT_MAX_THRESHOLD);
+      }
+      break;
+
+    case BEAT_MAYBE_DETECTED:
+      if (sample + BEAT_STEP_RESILIENCY < beatThreshold) {
+        beatDetected = true;
+        beatLastMaxValue = sample;
+        beatState = BEAT_MASKING;
+        float delta = millis() - beatTsLastBeat;
+        if (delta) {
+          beatPeriodMs = BEAT_BPFILTER_ALPHA * delta + (1 - BEAT_BPFILTER_ALPHA) * beatPeriodMs;
+        }
+        beatTsLastBeat = millis();
+      } else {
+        beatState = BEAT_FOLLOWING_SLOPE;
+      }
+      break;
+
+    case BEAT_MASKING:
+      if (millis() - beatTsLastBeat > BEAT_MASKING_HOLDOFF_MS) beatState = BEAT_WAITING;
+      beatDecreaseThreshold();
+      break;
+  }
+
+  return beatDetected;
+}
+
+float beatGetRate() {
+  return beatPeriodMs != 0 ? (1.0f / beatPeriodMs * 1000.0f * 60.0f) : 0;
+}
+
+// -- SpO2 calculator: log-ratio of AC RMS, averaged every 3 beats, mapped through a LUT --
+#define SPO2_CALC_EVERY_N_BEATS  3
+static const uint8_t spO2LUT[43] = {
+  100,100,100,100,99,99,99,99,99,99,98,98,98,98,
+  98,97,97,97,97,97,97,96,96,96,96,96,96,95,95,
+  95,95,95,95,94,94,94,94,94,93,93,93,93,93
+};
+static float spo2IrAcSqSum = 0, spo2RedAcSqSum = 0;
+static uint8_t spo2BeatsDetected = 0;
+static uint32_t spo2SamplesRecorded = 0;
+static uint8_t currentSpo2 = 0;
+
+void spo2Reset() {
+  spo2SamplesRecorded = 0;
+  spo2RedAcSqSum = 0;
+  spo2IrAcSqSum = 0;
+  spo2BeatsDetected = 0;
+}
+
+void spo2Update(float irAc, float redAc, bool beatDetected) {
+  spo2IrAcSqSum += irAc * irAc;
+  spo2RedAcSqSum += redAc * redAc;
+  spo2SamplesRecorded++;
+
+  if (beatDetected) {
+    spo2BeatsDetected++;
+    if (spo2BeatsDetected == SPO2_CALC_EVERY_N_BEATS) {
+      float acSqRatio = 100.0f * log(spo2RedAcSqSum / spo2SamplesRecorded) / log(spo2IrAcSqSum / spo2SamplesRecorded);
+      uint8_t index = 0;
+      if (acSqRatio > 66) {
+        index = (uint8_t)acSqRatio - 66;
+      } else if (acSqRatio > 50) {
+        index = (uint8_t)acSqRatio - 50;
+      }
+      spo2Reset();
+      if (index < 43) currentSpo2 = spO2LUT[index];
+    }
+  }
+}
 
 // ----------------------------- Sensors ------------------------------------
 OneWire oneWire(PIN_TEMP_ONEWIRE);
@@ -247,52 +391,25 @@ void updateMax30100() {
 
     bool fingerPresent = irSample > FINGER_PRESENT_THRESHOLD;
     if (!fingerPresent) {
-      avgIr = avgRed = sumIrAc = sumRedAc = 0;
-      filteredHr = 0;
-      lastHrCrossMs = 0;
       continue;
     }
 
-    double ir = irSample;
-    double red = redSample;
+    float irAc = irDCRemover.step((float)irSample);
+    float redAc = redDCRemover.step((float)redSample);
 
-    avgIr = avgIr * DC_ALPHA + ir * (1.0 - DC_ALPHA);
-    avgRed = avgRed * DC_ALPHA + red * (1.0 - DC_ALPHA);
+    // Signal fed to the beat detector is mirrored (cleanest monotonic spike is below zero).
+    float filteredPulse = lpf.step(-irAc);
+    bool beatDetected = beatCheckForBeat(filteredPulse);
 
-    double acIr = ir - avgIr;
-    double acRed = red - avgRed;
-
-    sumIrAc += acIr * acIr;
-    sumRedAc += acRed * acRed;
-
-    bool irAcPositive = acIr > 0;
-    if (!prevIrAcPositive && irAcPositive) {
-      unsigned long now = millis();
-      if (lastHrCrossMs > 0) {
-        unsigned long interval = now - lastHrCrossMs;
-        if (interval > 200 && interval < 2000) { // 30-300 BPM
-          float instantHr = 60000.0f / (float)interval;
-          filteredHr = HR_ALPHA * instantHr + (1.0f - HR_ALPHA) * filteredHr;
-        }
-      }
-      lastHrCrossMs = now;
+    if (beatGetRate() > 0) {
+      latestHr = beatGetRate();
+      spo2Update(irAc, redAc, beatDetected);
+      if (currentSpo2 > 0) latestSpo2 = currentSpo2;
     }
-    prevIrAcPositive = irAcPositive;
-    if (filteredHr > 0) latestHr = filteredHr;
 
-    spo2SampleCount++;
-    if (spo2SampleCount >= SPO2_WINDOW) {
-      if (avgIr > 0 && avgRed > 0) {
-        double ratio = (sqrt(sumRedAc) / avgRed) / (sqrt(sumIrAc) / avgIr);
-        float rawSpo2 = (float)(-23.3 * (ratio - 0.4) + 100.0);
-        rawSpo2 = constrain(rawSpo2, 70.0f, 100.0f);
-        filteredSpo2 = SPO2_ALPHA * filteredSpo2 + (1.0f - SPO2_ALPHA) * rawSpo2;
-        latestSpo2 = constrain(filteredSpo2, 70.0f, 100.0f);
-      }
-      sumIrAc = 0;
-      sumRedAc = 0;
-      spo2SampleCount = 0;
-    }
+#ifdef MAX30100_DEBUG
+    if (beatDetected) Serial.println("[MAX30100] Beat!");
+#endif
   }
 }
 

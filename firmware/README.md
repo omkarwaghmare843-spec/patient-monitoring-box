@@ -26,22 +26,19 @@ not an Arduino library:
   register map/init sequence targets the MAX30102/MAX30105 and failed `begin()` against this
   board's actual MAX30100 chip during testing ("MAX30100 not found on I2C bus").
 
-Heart rate (zero-crossing detection on the IR AC signal) and SpO2 (ratio-of-ratios of the
-Red/IR AC-over-DC ratios) are computed directly from the raw FIFO samples read over I2C, the
-same approach proven working on a reference MAX30102 project. This direct-driver version is
-confirmed working against the real hardware — part ID reads back correctly and the FIFO fills
-with a real pulsatile waveform. However, HR/SpO2 output from the direct driver in
-`HealthBox.ino` has not yet matched that result.
+Heart rate and SpO2 are computed with the same algorithm as the
+**[oxullo/Arduino-MAX30100](https://github.com/oxullo/Arduino-MAX30100)** library (DC remover +
+1-pole Butterworth low-pass + beat-detector state machine + log-ratio SpO2 lookup table),
+ported directly into this sketch since that library can't target a second I2C bus on its own.
+It was validated standalone first via [MAX30100_Test](MAX30100_Test/MAX30100_Test.ino) (that
+library installed on the global bus), which produced steady ~60-85 bpm HR and ~94-97% SpO2
+readings — confirming both the sensor and the algorithm before porting.
 
-[MAX30100_Test](MAX30100_Test/MAX30100_Test.ino) is currently running the
-**oxullo/Arduino-MAX30100** library (install "MAX30100lib" by OXullo Intersecans via Library
-Manager) to get a known-good HR/SpO2 reference implementation. That library's `begin()`
-hardcodes the global `Wire` instance, so the test sketch wires the MAX30100 to the global bus
-(fine for a standalone test with nothing else on the bus). Once it produces correct HR/SpO2
-values, its proven init/read sequence will be ported into `HealthBox.ino`'s own dedicated
-`TwoWire(1)` bus (which the library itself can't target directly). Keep all MAX30100
-hardware/algorithm debugging in this standalone sketch — do not edit `HealthBox.ino`'s MAX30100
-code until the test sketch proves out a working approach.
+One bug surfaced during that validation worth knowing about if you ever reinstall the
+`MAX30100` library: `MAX30100.h` hardcodes its I2C clock to 400kHz in `begin()`, which corrupts
+reads on this hardware (same root cause as the earlier direct-driver crash). It was patched to
+100kHz directly in the installed library file — not an issue for `HealthBox.ino`, which sets
+its own dedicated bus to 100kHz already.
 
 ## Arduino IDE setup
 
