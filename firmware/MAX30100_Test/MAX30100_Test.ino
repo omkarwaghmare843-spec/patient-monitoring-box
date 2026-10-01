@@ -25,11 +25,14 @@
   this library later, reapply that one-line change.
 
   This is fine to use the global bus here because nothing else needs it
-  in this test sketch. HealthBox.ino cannot use this library directly
-  because it needs a second, independent bus for the MAX30100 (the OLED
-  already occupies the global bus on 21/22) - once this sketch confirms
-  real HR/SpO2 values, we'll port the proven init/read sequence into
-  HealthBox.ino's own TwoWire(1) bus.
+  in this test sketch. HealthBox.ino does NOT use this library - it
+  needs a second, independent bus for the MAX30100 (the OLED has its
+  own dedicated bus too), which this library can't target. HealthBox.ino
+  uses a direct-register driver instead (see its header comment), whose
+  init sequence and HR/SpO2 math mirror a separately-proven working
+  MAX30102 reference project. This sketch stays useful purely as a
+  library-based cross-check: if HR/SpO2 work here but not in
+  HealthBox.ino, the problem is in the direct driver, not the sensor.
 
   Wiring: SDA=GPIO18  SCL=GPIO19 (set below)
 */
