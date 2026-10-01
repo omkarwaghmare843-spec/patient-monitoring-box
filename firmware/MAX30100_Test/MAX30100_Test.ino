@@ -2,8 +2,10 @@
   Standalone MAX30100 diagnostic sketch using the oxullo/Arduino-MAX30100
   library - no BLE, no OLED, no other sensors.
 
-  Install via Arduino Library Manager: search "MAX30100lib" by OXullo
-  Intersecans (https://github.com/oxullo/Arduino-MAX30100).
+  Install via Arduino Library Manager: search "MAX30100" by OXullo
+  Intersecans (https://github.com/oxullo/Arduino-MAX30100). Provides
+  MAX30100_PulseOximeter.h / class PulseOximeter (not MAX30100.h, which is
+  only the low-level FIFO driver this library builds on top of).
 
   This library's begin() hardcodes the global Wire instance (it has no
   overload accepting a custom TwoWire), so this standalone sketch wires
@@ -20,7 +22,7 @@
 */
 
 #include <Wire.h>
-#include <MAX30100lib.h>
+#include <MAX30100_PulseOximeter.h>
 
 #define MAX_SDA 18
 #define MAX_SCL 19
@@ -59,6 +61,6 @@ void loop() {
 
   if (millis() - lastReportMs > 1000) {
     lastReportMs = millis();
-    Serial.printf("HR: %.1f bpm | SpO2: %.1f %%\n", pox.getHeartRate(), pox.getSpO2());
+    Serial.printf("HR: %.1f bpm | SpO2: %u %%\n", pox.getHeartRate(), pox.getSpO2());
   }
 }

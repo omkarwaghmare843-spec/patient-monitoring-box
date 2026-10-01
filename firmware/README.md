@@ -52,7 +52,7 @@ code until the test sketch proves out a working approach.
    - `DallasTemperature` (Miles Burton)
    - `Adafruit GFX Library`
    - `Adafruit SSD1306`
-   - `MAX30100lib` (OXullo Intersecans) — only needed for `MAX30100_Test.ino`, not `HealthBox.ino`
+   - `MAX30100` (OXullo Intersecans) — only needed for `MAX30100_Test.ino`, not `HealthBox.ino`
 4. Open `HealthBox/HealthBox.ino`, select the correct COM port, and upload.
 5. Open Serial Monitor at **115200 baud** to confirm `HealthBox ready.` and check for any
    sensor init warnings (OLED/MAX30100 wiring issues print a message instead of crashing).
