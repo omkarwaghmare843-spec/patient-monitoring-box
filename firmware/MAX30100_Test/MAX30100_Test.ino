@@ -1,6 +1,9 @@
 /*
   Standalone MAX30100 diagnostic sketch - no BLE, no OLED, no other sensors.
   Flash this alone to isolate exactly what the MAX30100 chip is doing.
+  This is the only sketch that should be edited while bringing up the
+  MAX30100 - HealthBox.ino stays on its known-good direct-register driver
+  (see firmware/README.md) until this sketch proves out a change.
 
   Wiring: SDA=GPIO18  SCL=GPIO19  (adjust below if different)
 
@@ -9,9 +12,13 @@
    2. Reads PART_ID to confirm the chip responds (expect 0x11).
    3. Configures mode/SpO2/LED registers, reading each one back immediately
       to prove the write actually landed.
-   4. Every 500ms, dumps every relevant register's live value - including
-      INTERRUPT_STATUS, which on some MAX30100 units must be read at least
-      once to let the chip start filling its FIFO.
+   4. Polls the FIFO every loop (no delay) and drains every sample as soon
+      as it's available, printing ir/red values live. The original version
+      of this sketch polled every 500ms, which is slower than the FIFO
+      fills at 100Hz (16 slots = ~160ms to fill) - it was overflowing
+      between polls, not failing to sample. Draining continuously avoids
+      that and prints real-time ir/red pairs so finger-presence and signal
+      quality can be checked directly.
 */
 
 #include <Wire.h>
@@ -30,6 +37,9 @@
 #define REG_SPO2_CONFIG     0x07
 #define REG_LED_CONFIG      0x09
 #define REG_PART_ID         0xFF
+#define EXPECTED_PART_ID    0x11
+
+#define FINGER_PRESENT_THRESHOLD  20000UL
 
 TwoWire maxWire = TwoWire(1);
 
@@ -75,7 +85,7 @@ void setup() {
 
   Serial.println("\n-- Step 2: part ID --");
   uint8_t partId = readReg(REG_PART_ID);
-  Serial.printf("PART_ID = 0x%02X (expected 0x11)\n", partId);
+  Serial.printf("PART_ID = 0x%02X (expected 0x%02X)\n", partId, EXPECTED_PART_ID);
 
   Serial.println("\n-- Step 3: reset chip --");
   writeReg(REG_MODE_CONFIG, 0x40); // RESET bit (bit 6)
@@ -103,18 +113,34 @@ void setup() {
   writeReg(REG_MODE_CONFIG, 0x03);   // SpO2 + HR mode - enables sampling
   Serial.printf("MODE_CONFIG readback = 0x%02X (expect 0x03)\n", readReg(REG_MODE_CONFIG));
 
-  Serial.println("\n=== Setup complete. Watching FIFO pointer every 500ms... ===\n");
+  Serial.println("\n=== Setup complete. Draining FIFO continuously... ===\n");
 }
 
 void loop() {
-  uint8_t wr = readReg(REG_FIFO_WR_PTR);
-  uint8_t rd = readReg(REG_FIFO_RD_PTR);
+  uint8_t writePtr = readReg(REG_FIFO_WR_PTR);
+  uint8_t readPtr = readReg(REG_FIFO_RD_PTR);
   uint8_t ovf = readReg(REG_FIFO_OVF_CTR);
-  uint8_t mode = readReg(REG_MODE_CONFIG);
-  uint8_t intSt = readReg(REG_INT_STATUS);
+  int8_t samplesAvailable = (int8_t)(writePtr - readPtr) & 0x0F;
 
-  Serial.printf("wr=%u rd=%u ovf=%u MODE_CONFIG=0x%02X INT_STATUS=0x%02X\n",
-    wr, rd, ovf, mode, intSt);
+  static uint32_t lastStatusMs = 0;
+  if (millis() - lastStatusMs > 1000) {
+    lastStatusMs = millis();
+    Serial.printf("[status] wr=%u rd=%u ovf=%u avail=%d MODE_CONFIG=0x%02X\n",
+      writePtr, readPtr, ovf, samplesAvailable, readReg(REG_MODE_CONFIG));
+  }
 
-  delay(500);
+  for (int8_t i = 0; i < samplesAvailable; i++) {
+    maxWire.beginTransmission(MAX30100_ADDR);
+    maxWire.write(REG_FIFO_DATA);
+    maxWire.endTransmission(false);
+    maxWire.requestFrom((uint8_t)MAX30100_ADDR, (uint8_t)4);
+
+    if (maxWire.available() < 4) break;
+
+    uint16_t irSample = (maxWire.read() << 8) | maxWire.read();
+    uint16_t redSample = (maxWire.read() << 8) | maxWire.read();
+
+    bool fingerPresent = irSample > FINGER_PRESENT_THRESHOLD;
+    Serial.printf("ir=%u red=%u %s\n", irSample, redSample, fingerPresent ? "(finger)" : "");
+  }
 }

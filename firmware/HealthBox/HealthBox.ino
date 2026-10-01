@@ -14,12 +14,19 @@
     EMG analog signal ................. GPIO34 (ADC1_CH6, input-only)
     SW1 / SW2 .......................... EN / BOOT (board reset+flash, no firmware handling needed)
 
-  The MAX30100 is driven with the SparkFun MAX3010x library (MAX30105.h),
-  whose begin() accepts a custom TwoWire bus - unlike "MAX30100lib", which
-  hardcodes the global Wire instance and can't talk to a sensor on a second
-  I2C bus at all. HR/SpO2 are computed directly from the raw FIFO samples
-  (zero-crossing HR detection + ratio-of-ratios SpO2), the same approach
-  proven working in a reference MAX30102 project using this same library.
+  The MAX30100 is driven with a small direct-register driver in this sketch
+  instead of an Arduino library, because:
+   - "MAX30100lib" hardcodes a call to the global Wire instance inside
+     begin() with no way to pass a custom TwoWire bus - it physically cannot
+     talk to a sensor wired to a second I2C bus.
+   - The SparkFun MAX3010x library (MAX30105.h) does support a custom bus,
+     but its register map/init sequence targets the MAX30102/MAX30105 and
+     failed to detect this board's actual MAX30100 chip during testing.
+  Reading the FIFO and computing HR/SpO2 directly here (zero-crossing HR
+  detection + ratio-of-ratios SpO2, same approach used in a previously
+  working MAX30102 project) avoids both limitations and is the version
+  confirmed working against this hardware (FIFO fills, part ID reads back
+  correctly) via firmware/MAX30100_Test/MAX30100_Test.ino.
 
   ---------------------------------------------------------------------------
   BLE protocol (matches public/js/ble-service.js on the web app):
@@ -35,20 +42,18 @@
   Required libraries (Arduino Library Manager):
     - OneWire
     - DallasTemperature
-    - SparkFun MAX3010x Pulse and Proximity Sensor Library (provides MAX30105.h)
     - Adafruit GFX Library
     - Adafruit SSD1306
   Board core: esp32 by Espressif Systems (BLEDevice.h ships with the core)
   ---------------------------------------------------------------------------
 */
 
-// Uncomment to print raw MAX30100 IR/Red values to Serial for debugging.
+// Uncomment to print raw MAX30100 FIFO/IR/Red values to Serial for debugging.
 #define MAX30100_DEBUG
 
 #include <Wire.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
-#include "MAX30105.h"
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <BLEDevice.h>
@@ -79,9 +84,21 @@
 TwoWire oledWire = TwoWire(0);
 Adafruit_SSD1306 display(OLED_WIDTH, OLED_HEIGHT, &oledWire, OLED_RESET);
 
-// ----------------------------- MAX30100 (via SparkFun MAX3010x library) ------------------------------------
+// ----------------------------- MAX30100 direct driver ------------------------------------
+#define MAX30100_ADDR                  0x57
+#define MAX30100_REG_INT_STATUS        0x00
+#define MAX30100_REG_INT_ENABLE        0x01
+#define MAX30100_REG_FIFO_WR_PTR       0x02
+#define MAX30100_REG_FIFO_OVF_CTR      0x03
+#define MAX30100_REG_FIFO_RD_PTR       0x04
+#define MAX30100_REG_FIFO_DATA         0x05
+#define MAX30100_REG_MODE_CONFIG       0x06
+#define MAX30100_REG_SPO2_CONFIG       0x07
+#define MAX30100_REG_LED_CONFIG        0x09
+#define MAX30100_REG_PART_ID           0xFF
+#define MAX30100_EXPECTED_PART_ID      0x11
+
 TwoWire maxWire = TwoWire(1);
-MAX30105 particleSensor;
 bool max30100Online = false;
 
 // SpO2 / HR running state (same ratio-of-ratios + zero-crossing approach
@@ -144,21 +161,50 @@ class ServerCallbacks : public BLEServerCallbacks {
   }
 };
 
-// ----------------------------- MAX30100 setup/update (SparkFun MAX3010x library) ------------------------------------
+// ----------------------------- MAX30100 register helpers ------------------------------------
+void max30100WriteReg(uint8_t reg, uint8_t value) {
+  maxWire.beginTransmission(MAX30100_ADDR);
+  maxWire.write(reg);
+  maxWire.write(value);
+  maxWire.endTransmission();
+}
+
+uint8_t max30100ReadReg(uint8_t reg) {
+  maxWire.beginTransmission(MAX30100_ADDR);
+  maxWire.write(reg);
+  maxWire.endTransmission(false);
+  maxWire.requestFrom((uint8_t)MAX30100_ADDR, (uint8_t)1);
+  return maxWire.available() ? maxWire.read() : 0;
+}
+
 bool setupMax30100() {
-  if (!particleSensor.begin(maxWire, I2C_SPEED_STANDARD)) {
+  maxWire.beginTransmission(MAX30100_ADDR);
+  if (maxWire.endTransmission() != 0) {
     Serial.println("MAX30100 not found on I2C bus (SDA=18/SCL=19) - check wiring/power.");
     return false;
   }
 
-  particleSensor.setup(
-    0x1F,    // LED brightness 0-255 (moderate current; raise if readings stay too low)
-    4,       // sample average 1,2,4,8,16,32
-    2,       // ledMode: 2 = Red + IR
-    100,     // sample rate Hz
-    1600,    // pulse width us
-    4096     // ADC range
-  );
+  uint8_t partId = max30100ReadReg(MAX30100_REG_PART_ID);
+  if (partId != MAX30100_EXPECTED_PART_ID) {
+    Serial.printf("MAX30100 part ID mismatch: got 0x%02X, expected 0x%02X\n", partId, MAX30100_EXPECTED_PART_ID);
+    return false;
+  }
+
+  max30100WriteReg(MAX30100_REG_FIFO_WR_PTR, 0x00);
+  max30100WriteReg(MAX30100_REG_FIFO_OVF_CTR, 0x00);
+  max30100WriteReg(MAX30100_REG_FIFO_RD_PTR, 0x00);
+  max30100WriteReg(MAX30100_REG_SPO2_CONFIG, 0x47);       // hi-res, 100Hz, 1600us pulse
+  max30100WriteReg(MAX30100_REG_LED_CONFIG, 0x2F);        // IR/Red current ~7.6mA each
+  delay(10);
+  max30100WriteReg(MAX30100_REG_MODE_CONFIG, 0x03);       // SpO2 + HR mode, written last so sampling starts after everything else is configured
+  delay(50);
+
+#ifdef MAX30100_DEBUG
+  Serial.printf("[MAX30100] readback MODE_CONFIG=0x%02X SPO2_CONFIG=0x%02X LED_CONFIG=0x%02X\n",
+    max30100ReadReg(MAX30100_REG_MODE_CONFIG),
+    max30100ReadReg(MAX30100_REG_SPO2_CONFIG),
+    max30100ReadReg(MAX30100_REG_LED_CONFIG));
+#endif
 
   Serial.println("MAX30100 initialized.");
   return true;
@@ -167,18 +213,31 @@ bool setupMax30100() {
 void updateMax30100() {
   if (!max30100Online) return;
 
-  particleSensor.check();
-
-  while (particleSensor.available()) {
-    uint32_t irSample = particleSensor.getFIFOIR();
-    uint32_t redSample = particleSensor.getFIFORed();
+  uint8_t writePtr = max30100ReadReg(MAX30100_REG_FIFO_WR_PTR);
+  uint8_t readPtr = max30100ReadReg(MAX30100_REG_FIFO_RD_PTR);
+  int8_t samplesAvailable = (int8_t)(writePtr - readPtr) & 0x0F;
 
 #ifdef MAX30100_DEBUG
-    static uint32_t lastDebugMs = 0;
-    if (millis() - lastDebugMs > 200) {
-      lastDebugMs = millis();
-      Serial.printf("[MAX30100] ir=%u red=%u\n", irSample, redSample);
-    }
+  static uint32_t lastDebugMs = 0;
+  if (millis() - lastDebugMs > 1000) {
+    lastDebugMs = millis();
+    Serial.printf("[MAX30100] wrPtr=%u rdPtr=%u avail=%d\n", writePtr, readPtr, samplesAvailable);
+  }
+#endif
+
+  for (int8_t i = 0; i < samplesAvailable; i++) {
+    maxWire.beginTransmission(MAX30100_ADDR);
+    maxWire.write(MAX30100_REG_FIFO_DATA);
+    maxWire.endTransmission(false);
+    maxWire.requestFrom((uint8_t)MAX30100_ADDR, (uint8_t)4);
+
+    if (maxWire.available() < 4) break;
+
+    uint16_t irSample = (maxWire.read() << 8) | maxWire.read();
+    uint16_t redSample = (maxWire.read() << 8) | maxWire.read();
+
+#ifdef MAX30100_DEBUG
+    Serial.printf("[MAX30100] ir=%u red=%u\n", irSample, redSample);
 #endif
 
     bool fingerPresent = irSample > FINGER_PRESENT_THRESHOLD;
@@ -186,7 +245,6 @@ void updateMax30100() {
       avgIr = avgRed = sumIrAc = sumRedAc = 0;
       filteredHr = 0;
       lastHrCrossMs = 0;
-      particleSensor.nextSample();
       continue;
     }
 
@@ -230,8 +288,6 @@ void updateMax30100() {
       sumRedAc = 0;
       spo2SampleCount = 0;
     }
-
-    particleSensor.nextSample();
   }
 }
 

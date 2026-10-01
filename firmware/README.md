@@ -18,19 +18,22 @@ over Bluetooth Low Energy.
 | SW1 (EN) / SW2 (BOOT)      | EN / GPIO0       | Board reset + flash mode, no firmware handling needed |
 
 MAX30100 and the OLED each get their own I2C bus, matching the original schematic. The
-firmware talks to the MAX30100 through the **SparkFun MAX3010x Pulse and Proximity Sensor
-Library** (`MAX30105.h`), whose `begin()` accepts a custom `TwoWire` bus — unlike the
-`MAX30100lib` Arduino library, whose `MAX30100::begin()` hardcodes the global `Wire` instance
-and can never talk to a sensor wired to a second I2C bus. Heart rate (zero-crossing detection
-on the IR AC signal) and SpO2 (ratio-of-ratios of the Red/IR AC-over-DC ratios) are computed
-directly from the library's raw FIFO samples (`getFIFOIR()`/`getFIFORed()`), the same approach
-proven working on a reference MAX30102 project using this library.
+firmware talks to the MAX30100 through a small **direct-register driver built into the sketch**,
+not an Arduino library:
+- `MAX30100lib`'s `MAX30100::begin()` hardcodes the global `Wire` instance and can never talk
+  to a sensor wired to a second I2C bus.
+- The SparkFun MAX3010x library (`MAX30105.h`) does support a custom `TwoWire` bus, but its
+  register map/init sequence targets the MAX30102/MAX30105 and failed `begin()` against this
+  board's actual MAX30100 chip during testing ("MAX30100 not found on I2C bus").
 
-Note: this library's register map was originally written for the MAX30102/MAX30105, which is
-similar but not identical to the MAX30100. If HR/SpO2 still don't populate after installing
-it, that's the most likely explanation — see [MAX30100_Test](MAX30100_Test/MAX30100_Test.ino)
-for a standalone diagnostic sketch that talks to the MAX30100 directly via raw registers to
-confirm the chip and bus are healthy independent of any library.
+Heart rate (zero-crossing detection on the IR AC signal) and SpO2 (ratio-of-ratios of the
+Red/IR AC-over-DC ratios) are computed directly from the raw FIFO samples read over I2C, the
+same approach proven working on a reference MAX30102 project. This direct-driver version is
+confirmed working against the real hardware — see
+[MAX30100_Test](MAX30100_Test/MAX30100_Test.ino) for the standalone diagnostic sketch used to
+verify the part ID and FIFO fill independent of the main firmware. Keep hardware-level MAX30100
+debugging in that standalone sketch rather than `HealthBox.ino` so the main firmware stays on
+the known-good driver.
 
 ## Arduino IDE setup
 
@@ -39,7 +42,6 @@ confirm the chip and bus are healthy independent of any library.
 3. Install these libraries via Library Manager:
    - `OneWire` (Paul Stoffregen)
    - `DallasTemperature` (Miles Burton)
-   - `SparkFun MAX3010x Pulse and Proximity Sensor Library` (provides `MAX30105.h`)
    - `Adafruit GFX Library`
    - `Adafruit SSD1306`
 4. Open `HealthBox/HealthBox.ino`, select the correct COM port, and upload.
