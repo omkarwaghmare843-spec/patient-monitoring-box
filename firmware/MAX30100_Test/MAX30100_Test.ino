@@ -8,11 +8,24 @@
   only the low-level FIFO driver this library builds on top of).
 
   This library's begin() hardcodes the global Wire instance (it has no
-  overload accepting a custom TwoWire), so this standalone sketch wires
-  the MAX30100 to the GLOBAL I2C bus (default pins 21/22 on most ESP32
-  boards, or override with Wire.begin(SDA,SCL) below if your MAX30100 is
-  on different pins). This is fine here because nothing else needs the
-  bus in this test sketch. HealthBox.ino cannot use this library directly
+  overload accepting a custom TwoWire). Its internal Wire.begin() call
+  (no pin args) re-uses whichever pins were already set by our own
+  Wire.begin(SDA,SCL) call beforehand - ESP32's Wire.begin(-1,-1) reuses
+  the last configured pins rather than resetting to board defaults, so
+  that part is fine.
+
+  The real bug this sketch worked around: MAX30100.h hardcodes
+  I2C_BUS_SPEED to 400000 (400kHz) and the library applies that speed
+  unconditionally in begin(), silently overriding any Wire.setClock()
+  call made beforehand. We already proved 400kHz causes corrupted
+  reads/bus crashes on this exact hardware (see HealthBox.ino's own
+  100kHz fix). Fixed by editing the installed library at
+  C:\ArduinoLibs\libraries\MAX30100\src\MAX30100.h, changing
+  I2C_BUS_SPEED from 400000UL to 100000UL - if you reinstall or update
+  this library later, reapply that one-line change.
+
+  This is fine to use the global bus here because nothing else needs it
+  in this test sketch. HealthBox.ino cannot use this library directly
   because it needs a second, independent bus for the MAX30100 (the OLED
   already occupies the global bus on 21/22) - once this sketch confirms
   real HR/SpO2 values, we'll port the proven init/read sequence into
