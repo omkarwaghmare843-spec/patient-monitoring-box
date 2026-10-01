@@ -152,17 +152,31 @@ void setupOled() {
   display.display();
 }
 
+#define MAX30100_INIT_ATTEMPTS      6
+#define MAX30100_INIT_RETRY_MS      500
+
 bool setupMax30100() {
   Wire.begin(PIN_MAX30100_SDA, PIN_MAX30100_SCL);
 
-  if (!pox.begin()) {
-    Serial.println("MAX30100 not found on I2C bus (SDA=18/SCL=19) - check wiring/power.");
-    return false;
+  // Right after power-on, the MAX30100's internal LDO/oscillator can still be
+  // settling, so the first begin() attempt(s) may fail even though the chip
+  // is fine - a reset button press (no power-cycle) skips this and works on
+  // the first try, which is the symptom this retry loop fixes. Settling is
+  // a one-time condition, so retrying a few times covers it without masking
+  // a genuine wiring/power fault (which will keep failing every attempt).
+  for (uint8_t attempt = 1; attempt <= MAX30100_INIT_ATTEMPTS; attempt++) {
+    if (pox.begin()) {
+      pox.setOnBeatDetectedCallback(onBeatDetected);
+      Serial.printf("MAX30100 initialized (attempt %u/%u).\n", attempt, MAX30100_INIT_ATTEMPTS);
+      return true;
+    }
+    Serial.printf("MAX30100 not found on I2C bus (SDA=18/SCL=19), attempt %u/%u - retrying...\n",
+      attempt, MAX30100_INIT_ATTEMPTS);
+    delay(MAX30100_INIT_RETRY_MS);
   }
 
-  pox.setOnBeatDetectedCallback(onBeatDetected);
-  Serial.println("MAX30100 initialized.");
-  return true;
+  Serial.println("MAX30100 init failed after all retries - check wiring/power.");
+  return false;
 }
 
 void setupBle() {
@@ -211,8 +225,26 @@ void setup() {
 }
 
 // ----------------------------- Readers ------------------------------------
+const uint32_t MAX30100_RETRY_INTERVAL_MS = 5000;
+uint32_t lastMax30100RetryMs = 0;
+
 void updateMax30100() {
-  if (!max30100Online) return;
+  if (!max30100Online) {
+    // Keep retrying in the background instead of requiring a manual reset -
+    // covers the case where the sensor was still settling at boot (or was
+    // unplugged/replugged) and becomes available later.
+    uint32_t now = millis();
+    if (now - lastMax30100RetryMs >= MAX30100_RETRY_INTERVAL_MS) {
+      lastMax30100RetryMs = now;
+      Serial.println("[MAX30100] Retrying init...");
+      max30100Online = pox.begin();
+      if (max30100Online) {
+        pox.setOnBeatDetectedCallback(onBeatDetected);
+        Serial.println("MAX30100 initialized (background retry).");
+      }
+    }
+    return;
+  }
   pox.update();
   latestHr = pox.getHeartRate();
   uint8_t spo2 = pox.getSpO2();
@@ -288,13 +320,18 @@ void refreshOled() {
   display.print(isnan(latestTemp) ? "--" : String(latestTemp, 1));
   display.println(" C");
 
-  display.print("HR   : ");
-  display.print((isnan(latestHr) || latestHr <= 0) ? "--" : String(latestHr, 0));
-  display.println(" bpm");
+  if (max30100Online) {
+    display.print("HR   : ");
+    display.print((isnan(latestHr) || latestHr <= 0) ? "--" : String(latestHr, 0));
+    display.println(" bpm");
 
-  display.print("SpO2 : ");
-  display.print(isnan(latestSpo2) ? "--" : String(latestSpo2, 0));
-  display.println(" %");
+    display.print("SpO2 : ");
+    display.print(isnan(latestSpo2) ? "--" : String(latestSpo2, 0));
+    display.println(" %");
+  } else {
+    display.println("HR   : sensor offline");
+    display.println("SpO2 : retrying...");
+  }
 
   display.display();
 }
