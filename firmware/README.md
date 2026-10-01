@@ -29,11 +29,19 @@ not an Arduino library:
 Heart rate (zero-crossing detection on the IR AC signal) and SpO2 (ratio-of-ratios of the
 Red/IR AC-over-DC ratios) are computed directly from the raw FIFO samples read over I2C, the
 same approach proven working on a reference MAX30102 project. This direct-driver version is
-confirmed working against the real hardware — see
-[MAX30100_Test](MAX30100_Test/MAX30100_Test.ino) for the standalone diagnostic sketch used to
-verify the part ID and FIFO fill independent of the main firmware. Keep hardware-level MAX30100
-debugging in that standalone sketch rather than `HealthBox.ino` so the main firmware stays on
-the known-good driver.
+confirmed working against the real hardware — part ID reads back correctly and the FIFO fills
+with a real pulsatile waveform. However, HR/SpO2 output from the direct driver in
+`HealthBox.ino` has not yet matched that result.
+
+[MAX30100_Test](MAX30100_Test/MAX30100_Test.ino) is currently running the
+**oxullo/Arduino-MAX30100** library (install "MAX30100lib" by OXullo Intersecans via Library
+Manager) to get a known-good HR/SpO2 reference implementation. That library's `begin()`
+hardcodes the global `Wire` instance, so the test sketch wires the MAX30100 to the global bus
+(fine for a standalone test with nothing else on the bus). Once it produces correct HR/SpO2
+values, its proven init/read sequence will be ported into `HealthBox.ino`'s own dedicated
+`TwoWire(1)` bus (which the library itself can't target directly). Keep all MAX30100
+hardware/algorithm debugging in this standalone sketch — do not edit `HealthBox.ino`'s MAX30100
+code until the test sketch proves out a working approach.
 
 ## Arduino IDE setup
 
@@ -44,6 +52,7 @@ the known-good driver.
    - `DallasTemperature` (Miles Burton)
    - `Adafruit GFX Library`
    - `Adafruit SSD1306`
+   - `MAX30100lib` (OXullo Intersecans) — only needed for `MAX30100_Test.ino`, not `HealthBox.ino`
 4. Open `HealthBox/HealthBox.ino`, select the correct COM port, and upload.
 5. Open Serial Monitor at **115200 baud** to confirm `HealthBox ready.` and check for any
    sensor init warnings (OLED/MAX30100 wiring issues print a message instead of crashing).
