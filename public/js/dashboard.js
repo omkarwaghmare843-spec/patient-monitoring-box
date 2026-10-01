@@ -4,6 +4,7 @@ import { getStatus } from './vitals-ranges.js';
 import { db, collection, addDoc, serverTimestamp } from './firebase-init.js';
 
 const MAX_POINTS = 30;
+const MAX_WAVEFORM_POINTS = 150; // ~15s of ECG/EMG at the 10Hz batch rate
 
 const el = {
   statusDot: document.getElementById('statusDot'),
@@ -12,11 +13,20 @@ const el = {
   connectBtn: document.getElementById('connectBtn'),
   disconnectBtn: document.getElementById('disconnectBtn'),
   saveBtn: document.getElementById('saveBtn'),
+  bpSystolic: document.getElementById('bpSystolic'),
+  bpDiastolic: document.getElementById('bpDiastolic'),
 };
 
 let currentUser = null;
-let latestReading = null;
 let hasAnyReading = false;
+
+const latest = {
+  temperature: null,
+  heartRate: null,
+  spo2: null,
+  ecg: null,
+  emg: null,
+};
 
 requireAuth((user) => {
   currentUser = user;
@@ -40,13 +50,13 @@ const chartDefaults = {
   elements: { point: { radius: 0 }, line: { tension: 0.35, borderWidth: 2 } },
 };
 
-function makeChart(canvasId, color, softColor) {
+function makeChart(canvasId, color, softColor, maxPoints) {
   if (typeof Chart === 'undefined') {
     console.error('Chart.js failed to load; live trend charts are disabled.');
     return null;
   }
   const ctx = document.getElementById(canvasId).getContext('2d');
-  return new Chart(ctx, {
+  const chart = new Chart(ctx, {
     type: 'line',
     data: {
       labels: [],
@@ -54,14 +64,16 @@ function makeChart(canvasId, color, softColor) {
     },
     options: chartDefaults,
   });
+  chart._maxPoints = maxPoints;
+  return chart;
 }
 
 const charts = {
-  hr: makeChart('chart-hr', '#ec4899', 'rgba(236,72,153,0.08)'),
-  spo2: makeChart('chart-spo2', '#0ea5e9', 'rgba(14,165,233,0.08)'),
-  ecg: makeChart('chart-ecg', '#e11d48', 'rgba(225,29,72,0.08)'),
-  emg: makeChart('chart-emg', '#8b5cf6', 'rgba(139,92,246,0.08)'),
-  temp: makeChart('chart-temp', '#f97316', 'rgba(249,115,22,0.08)'),
+  hr: makeChart('chart-hr', '#ec4899', 'rgba(236,72,153,0.08)', MAX_POINTS),
+  spo2: makeChart('chart-spo2', '#0ea5e9', 'rgba(14,165,233,0.08)', MAX_POINTS),
+  ecg: makeChart('chart-ecg', '#e11d48', 'rgba(225,29,72,0.08)', MAX_WAVEFORM_POINTS),
+  emg: makeChart('chart-emg', '#8b5cf6', 'rgba(139,92,246,0.08)', MAX_WAVEFORM_POINTS),
+  temp: makeChart('chart-temp', '#f97316', 'rgba(249,115,22,0.08)', MAX_POINTS),
 };
 
 function pushPoint(chart, value) {
@@ -69,8 +81,23 @@ function pushPoint(chart, value) {
   const ds = chart.data.datasets[0];
   chart.data.labels.push('');
   ds.data.push(value);
-  if (ds.data.length > MAX_POINTS) {
+  const cap = chart._maxPoints || MAX_POINTS;
+  if (ds.data.length > cap) {
     ds.data.shift();
+    chart.data.labels.shift();
+  }
+  chart.update('none');
+}
+
+function pushPoints(chart, values) {
+  if (!chart || !values || !values.length) return;
+  values.forEach((v) => {
+    chart.data.labels.push('');
+    chart.data.datasets[0].data.push(v);
+  });
+  const cap = chart._maxPoints || MAX_POINTS;
+  while (chart.data.datasets[0].data.length > cap) {
+    chart.data.datasets[0].data.shift();
     chart.data.labels.shift();
   }
   chart.update('none');
@@ -118,28 +145,44 @@ function resetConnectUI() {
   el.disconnectBtn.hidden = true;
 }
 
-bleService.onData = (reading) => {
-  latestReading = reading;
+// ----- Vitals (temp/hr/spo2, ~1Hz) -----
+bleService.onVitals = (reading) => {
   hasAnyReading = true;
   el.saveBtn.disabled = false;
+
+  latest.temperature = reading.temperature;
+  latest.heartRate = reading.heartRate;
+  latest.spo2 = reading.spo2;
 
   document.getElementById('val-temp').textContent = reading.temperature ?? '--';
   document.getElementById('val-hr').textContent = reading.heartRate ?? '--';
   document.getElementById('val-spo2').textContent = reading.spo2 ?? '--';
-  document.getElementById('val-ecg').textContent = reading.ecg ?? '--';
-  document.getElementById('val-emg').textContent = reading.emg ?? '--';
 
   renderBadge('temperature', reading.temperature);
   renderBadge('heartRate', reading.heartRate);
   renderBadge('spo2', reading.spo2);
-  renderBadge('ecg', reading.ecg);
-  renderBadge('emg', reading.emg);
 
   if (reading.heartRate !== null) pushPoint(charts.hr, reading.heartRate);
   if (reading.spo2 !== null) pushPoint(charts.spo2, reading.spo2);
-  if (reading.ecg !== null) pushPoint(charts.ecg, reading.ecg);
-  if (reading.emg !== null) pushPoint(charts.emg, reading.emg);
   if (reading.temperature !== null) pushPoint(charts.temp, reading.temperature);
+};
+
+// ----- Waveform (ecg/emg sample batches, ~10Hz) -----
+bleService.onWaveform = (batch) => {
+  hasAnyReading = true;
+  el.saveBtn.disabled = false;
+
+  if (batch.ecg.length) {
+    latest.ecg = batch.ecg[batch.ecg.length - 1];
+    document.getElementById('val-ecg').textContent = latest.ecg;
+    pushPoints(charts.ecg, batch.ecg);
+  }
+
+  if (batch.emg.length) {
+    latest.emg = batch.emg[batch.emg.length - 1];
+    document.getElementById('val-emg').textContent = latest.emg;
+    pushPoints(charts.emg, batch.emg);
+  }
 };
 
 // ----- Connect / Disconnect actions -----
@@ -162,21 +205,29 @@ el.disconnectBtn.addEventListener('click', () => {
 
 // ----- Save checkup to Firestore -----
 el.saveBtn.addEventListener('click', async () => {
-  if (!currentUser || !latestReading) return;
+  if (!currentUser) return;
+
+  const systolic = el.bpSystolic.value ? Number(el.bpSystolic.value) : null;
+  const diastolic = el.bpDiastolic.value ? Number(el.bpDiastolic.value) : null;
 
   el.saveBtn.disabled = true;
   el.saveBtn.innerHTML = '<span class="spinner dark"></span> Saving…';
 
   try {
-    await addDoc(collection(db, 'users', currentUser.uid, 'checkups'), {
-      temperature: latestReading.temperature,
-      heartRate: latestReading.heartRate,
-      spo2: latestReading.spo2,
-      ecg: latestReading.ecg,
-      emg: latestReading.emg,
+    const docRef = await addDoc(collection(db, 'users', currentUser.uid, 'checkups'), {
+      temperature: latest.temperature,
+      heartRate: latest.heartRate,
+      spo2: latest.spo2,
+      ecg: latest.ecg,
+      emg: latest.emg,
+      bpSystolic: systolic,
+      bpDiastolic: diastolic,
       recordedAt: serverTimestamp(),
     });
-    toast('Checkup saved successfully.', 'success');
+    toast('Checkup saved. Analyzing with AI…', 'success');
+    el.bpSystolic.value = '';
+    el.bpDiastolic.value = '';
+    requestAiAnalysis(currentUser.uid, docRef.id);
   } catch (err) {
     console.error(err);
     toast('Failed to save checkup. Please try again.', 'error');
@@ -187,3 +238,20 @@ el.saveBtn.addEventListener('click', async () => {
     el.saveBtn.disabled = !hasAnyReading;
   }
 });
+
+// ----- AI analysis (fire-and-forget; result shows up next time History loads) -----
+async function requestAiAnalysis(uid, checkupId) {
+  try {
+    const idToken = await currentUser.getIdToken();
+    const res = await fetch('/api/analyze-checkup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
+      body: JSON.stringify({ checkupId }),
+    });
+    if (!res.ok) throw new Error(`Analysis request failed (${res.status})`);
+    toast('AI health insight ready — view it in History.', 'success');
+  } catch (err) {
+    console.error('AI analysis request failed:', err);
+    toast('Could not generate AI insight for this checkup.', 'error');
+  }
+}

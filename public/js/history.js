@@ -1,5 +1,5 @@
 import { requireAuth } from './app-shell.js';
-import { getStatus } from './vitals-ranges.js';
+import { getStatus, getBpStatus } from './vitals-ranges.js';
 import { db, collection, query, orderBy, limit, getDocs } from './firebase-init.js';
 
 const tbody = document.getElementById('historyBody');
@@ -34,6 +34,31 @@ const trendHr = makeTrendChart('trend-hr', '#ec4899', 'rgba(236,72,153,0.08)');
 const trendSpo2 = makeTrendChart('trend-spo2', '#0ea5e9', 'rgba(14,165,233,0.08)');
 const trendTemp = makeTrendChart('trend-temp', '#f97316', 'rgba(249,115,22,0.08)');
 
+function showInsightModal(text) {
+  let modal = document.getElementById('insightModal');
+  if (!modal) {
+    modal = document.createElement('div');
+    modal.id = 'insightModal';
+    modal.className = 'modal-overlay';
+    modal.innerHTML = `
+      <div class="modal-card">
+        <div class="modal-header">
+          <h3>AI Health Insight</h3>
+          <button type="button" class="modal-close" aria-label="Close">&times;</button>
+        </div>
+        <p class="modal-body"></p>
+      </div>`;
+    document.body.appendChild(modal);
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal || e.target.classList.contains('modal-close')) {
+        modal.classList.remove('active');
+      }
+    });
+  }
+  modal.querySelector('.modal-body').textContent = text;
+  modal.classList.add('active');
+}
+
 function formatDate(ts) {
   if (!ts) return '—';
   const date = ts.toDate ? ts.toDate() : new Date(ts);
@@ -46,6 +71,23 @@ function badgeCell(key, value, unit) {
   if (value === null || value === undefined) return `<span class="text-muted">—</span>`;
   const status = getStatus(key, value);
   return `<span class="badge badge-${status}">${value} ${unit}</span>`;
+}
+
+function bpCell(systolic, diastolic) {
+  if (systolic === null || systolic === undefined || diastolic === null || diastolic === undefined) {
+    return `<span class="text-muted">—</span>`;
+  }
+  const status = getBpStatus(systolic, diastolic);
+  return `<span class="badge badge-${status}">${systolic}/${diastolic} mmHg</span>`;
+}
+
+function aiCell(aiInsight, aiStatus) {
+  if (aiStatus === 'pending') return `<span class="badge badge-neutral">Analyzing…</span>`;
+  if (aiStatus === 'error') return `<span class="badge badge-warning">Unavailable</span>`;
+  if (!aiInsight) return `<span class="text-muted">—</span>`;
+  const preview = aiInsight.length > 60 ? aiInsight.slice(0, 60) + '…' : aiInsight;
+  const escaped = aiInsight.replace(/"/g, '&quot;');
+  return `<button type="button" class="btn btn-secondary btn-sm ai-insight-btn" data-insight="${escaped}" style="white-space:normal; text-align:left;">${preview}</button>`;
 }
 
 requireAuth(async (user) => {
@@ -75,11 +117,19 @@ requireAuth(async (user) => {
           <td>${badgeCell('temperature', r.temperature, '°C')}</td>
           <td>${badgeCell('heartRate', r.heartRate, 'bpm')}</td>
           <td>${badgeCell('spo2', r.spo2, '%')}</td>
+          <td>${bpCell(r.bpSystolic, r.bpDiastolic)}</td>
           <td>${r.ecg ?? '—'}</td>
           <td>${r.emg ?? '—'}</td>
+          <td>${aiCell(r.aiInsight, r.aiStatus)}</td>
         </tr>`
       )
       .join('');
+
+    tbody.querySelectorAll('.ai-insight-btn').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        showInsightModal(btn.dataset.insight);
+      });
+    });
 
     // Charts: chronological order (oldest -> newest)
     const chrono = [...rows].reverse();

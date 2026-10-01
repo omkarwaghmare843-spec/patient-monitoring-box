@@ -39,6 +39,26 @@
         </div>
       </div>
 
+      <!-- Manual Blood Pressure entry -->
+      <div class="card" style="margin-bottom:24px;">
+        <div class="card-header">
+          <h3>Blood Pressure</h3>
+          <p class="text-muted">No BP sensor on the box &mdash; enter your reading manually before saving.</p>
+        </div>
+        <div style="display:flex; gap:12px; flex-wrap:wrap; align-items:flex-end;">
+          <div class="field" style="margin-bottom:0; max-width:140px;">
+            <label for="bpSystolic">Systolic</label>
+            <input type="number" id="bpSystolic" placeholder="120" min="50" max="250" />
+          </div>
+          <div style="font-size:22px; font-weight:700; color:var(--color-text-faint); padding-bottom:11px;">/</div>
+          <div class="field" style="margin-bottom:0; max-width:140px;">
+            <label for="bpDiastolic">Diastolic</label>
+            <input type="number" id="bpDiastolic" placeholder="80" min="30" max="150" />
+          </div>
+          <div class="hint" style="padding-bottom:11px;">mmHg</div>
+        </div>
+      </div>
+
       <!-- Vitals grid -->
       <div class="vitals-grid">
         <div class="vital-card vc-temp">
@@ -73,8 +93,8 @@
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="2 12 7 12 9 6 13 18 15 12 22 12"/></svg>
           </div>
           <div class="vital-label">ECG</div>
-          <div class="vital-value"><span id="val-ecg">--</span><span class="unit">mV</span></div>
-          <div class="vital-range" id="badge-ecg"><span class="badge badge-neutral">No data</span></div>
+          <div class="vital-value"><span id="val-ecg">--</span><span class="unit">raw</span></div>
+          <div class="vital-range"><span class="badge badge-neutral">Live signal</span></div>
         </div>
 
         <div class="vital-card vc-emg">
@@ -82,8 +102,8 @@
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h3l2-7 4 14 3-10 2 3h4"/></svg>
           </div>
           <div class="vital-label">EMG</div>
-          <div class="vital-value"><span id="val-emg">--</span><span class="unit">&micro;V</span></div>
-          <div class="vital-range" id="badge-emg"><span class="badge badge-neutral">No data</span></div>
+          <div class="vital-value"><span id="val-emg">--</span><span class="unit">raw</span></div>
+          <div class="vital-range"><span class="badge badge-neutral">Live signal</span></div>
         </div>
       </div>
 
