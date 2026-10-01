@@ -42,6 +42,9 @@
   ---------------------------------------------------------------------------
 */
 
+// Uncomment to print raw MAX30100 FIFO/IR/Red values to Serial for debugging.
+#define MAX30100_DEBUG
+
 #include <Wire.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
@@ -199,6 +202,14 @@ void updateMax30100() {
   uint8_t readPtr = max30100ReadReg(MAX30100_REG_FIFO_RD_PTR);
   int8_t samplesAvailable = (int8_t)(writePtr - readPtr) & 0x0F;
 
+#ifdef MAX30100_DEBUG
+  static uint32_t lastDebugMs = 0;
+  if (millis() - lastDebugMs > 1000) {
+    lastDebugMs = millis();
+    Serial.printf("[MAX30100] wrPtr=%u rdPtr=%u avail=%d\n", writePtr, readPtr, samplesAvailable);
+  }
+#endif
+
   for (int8_t i = 0; i < samplesAvailable; i++) {
     maxWire.beginTransmission(MAX30100_ADDR);
     maxWire.write(MAX30100_REG_FIFO_DATA);
@@ -209,6 +220,10 @@ void updateMax30100() {
 
     uint16_t irSample = (maxWire.read() << 8) | maxWire.read();
     uint16_t redSample = (maxWire.read() << 8) | maxWire.read();
+
+#ifdef MAX30100_DEBUG
+    Serial.printf("[MAX30100] ir=%u red=%u\n", irSample, redSample);
+#endif
 
     bool fingerPresent = irSample > FINGER_PRESENT_THRESHOLD;
     if (!fingerPresent) {
