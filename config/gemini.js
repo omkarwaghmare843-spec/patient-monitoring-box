@@ -11,12 +11,16 @@ function getClient() {
   return client;
 }
 
+// Gemini's exact model names get deprecated/renamed over time (this project has
+// already hit that twice). Falling through a short list of current flash models
+// means one deprecation doesn't silently break AI insights again.
+const MODEL_CANDIDATES = ['gemini-flash-latest', 'gemini-2.5-flash', 'gemini-2.0-flash'];
+
 // Builds a short, plain-language wellness note from one checkup's readings.
 // This is an at-home screening aid, not a diagnosis - the prompt explicitly
 // steers the model away from diagnostic claims.
 async function analyzeCheckup(vitals) {
   const genAI = getClient();
-  const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
 
   const lines = [];
   if (vitals.temperature !== null && vitals.temperature !== undefined) lines.push(`Temperature: ${vitals.temperature} °C`);
@@ -42,9 +46,19 @@ Write a short (3-4 sentences, plain language, no markdown) wellness note for the
 - Always end by reminding them this is not a medical diagnosis and a doctor should be consulted for any concerning or persistent readings.
 - Do not use alarming language. Do not diagnose a condition by name.`;
 
-  const result = await model.generateContent(prompt);
-  const text = result.response.text().trim();
-  return text || 'AI analysis did not return a result for this checkup.';
+  let lastErr = null;
+  for (const modelName of MODEL_CANDIDATES) {
+    try {
+      const model = genAI.getGenerativeModel({ model: modelName });
+      const result = await model.generateContent(prompt);
+      const text = result.response.text().trim();
+      return text || 'AI analysis did not return a result for this checkup.';
+    } catch (err) {
+      lastErr = err;
+      console.error(`Gemini model "${modelName}" failed: ${err.message}`);
+    }
+  }
+  throw lastErr || new Error('All Gemini model candidates failed.');
 }
 
 module.exports = { analyzeCheckup };

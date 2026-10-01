@@ -6,6 +6,27 @@ import { db, collection, addDoc, serverTimestamp } from './firebase-init.js';
 const MAX_POINTS = 30;
 const MAX_WAVEFORM_POINTS = 150; // ~15s of ECG/EMG at the 10Hz batch rate
 
+// Each parameter records for its own duration, then averages the samples
+// collected during that window. Durations reflect how each sensor behaves:
+// HR/SpO2 need a few seconds for the MAX30100's beat detector to lock on,
+// temperature responds quickly, and ECG/EMG need a few seconds of waveform
+// to be a meaningful trace rather than a single instantaneous sample.
+const RECORD_DURATIONS_MS = {
+  temperature: 5000,
+  heartRate: 15000,
+  spo2: 15000,
+  ecg: 10000,
+  emg: 10000,
+};
+
+const PARAM_LABELS = {
+  temperature: 'Temperature',
+  heartRate: 'Heart Rate',
+  spo2: 'SpO2',
+  ecg: 'ECG',
+  emg: 'EMG',
+};
+
 const el = {
   statusDot: document.getElementById('statusDot'),
   statusTitle: document.getElementById('statusTitle'),
@@ -18,8 +39,19 @@ const el = {
 };
 
 let currentUser = null;
-let hasAnyReading = false;
 
+// Final recorded (averaged) value per parameter - only these are saved.
+// null until that parameter's recording has completed at least once.
+const recorded = {
+  temperature: null,
+  heartRate: null,
+  spo2: null,
+  ecg: null,
+  emg: null,
+};
+
+// Live (unrecorded) readings, used only to drive the dashboard display/charts
+// while connected - never saved directly, only recorded values are saved.
 const latest = {
   temperature: null,
   heartRate: null,
@@ -27,6 +59,12 @@ const latest = {
   ecg: null,
   emg: null,
 };
+
+// Recording session state per parameter.
+const sessions = {};
+for (const key of Object.keys(RECORD_DURATIONS_MS)) {
+  sessions[key] = { active: false, samples: [], startedAt: 0, timerId: null, rafId: null };
+}
 
 requireAuth((user) => {
   currentUser = user;
@@ -112,6 +150,110 @@ function renderBadge(key, value) {
   badgeEl.innerHTML = `<span class="badge badge-${status}">${labelMap[status]}</span>`;
 }
 
+// ----- Recording controls (per parameter) -----
+function average(arr) {
+  if (!arr.length) return null;
+  return arr.reduce((a, b) => a + b, 0) / arr.length;
+}
+
+function renderRecordControls(key) {
+  const container = document.getElementById(`record-${key}`);
+  const card = document.getElementById(`card-${cardSuffix(key)}`);
+  if (!container) return;
+  const session = sessions[key];
+  const isDone = recorded[key] !== null && !session.active;
+
+  card?.classList.toggle('is-recording', session.active);
+  card?.classList.toggle('is-done', isDone);
+
+  if (session.active) {
+    const elapsed = Date.now() - session.startedAt;
+    const duration = RECORD_DURATIONS_MS[key];
+    const pct = Math.min(100, (elapsed / duration) * 100);
+    const remainingS = Math.max(0, Math.ceil((duration - elapsed) / 1000));
+    container.innerHTML = `
+      <div class="record-progress">
+        <div class="record-progress-track"><div class="record-progress-fill" style="width:${pct}%"></div></div>
+        <div class="record-progress-label">Recording&hellip; ${remainingS}s left</div>
+      </div>`;
+    return;
+  }
+
+  if (isDone) {
+    container.innerHTML = `
+      <div class="record-done">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+        Recorded
+      </div>
+      <button type="button" class="record-btn" data-record="${key}" style="margin-top:6px;">Record again</button>`;
+    return;
+  }
+
+  container.innerHTML = `<button type="button" class="record-btn" data-record="${key}">Start Record</button>`;
+}
+
+function cardSuffix(key) {
+  return key === 'heartRate' ? 'hr' : key === 'spo2' ? 'spo2' : key === 'temperature' ? 'temp' : key;
+}
+
+function startRecording(key) {
+  if (!bleService.isSupported || sessions[key].active) return;
+  const session = sessions[key];
+  session.active = true;
+  session.samples = [];
+  session.startedAt = Date.now();
+
+  renderRecordControls(key);
+
+  const tick = () => {
+    if (!session.active) return;
+    renderRecordControls(key);
+    session.rafId = requestAnimationFrame(tick);
+  };
+  session.rafId = requestAnimationFrame(tick);
+
+  session.timerId = setTimeout(() => finishRecording(key), RECORD_DURATIONS_MS[key]);
+}
+
+function finishRecording(key) {
+  const session = sessions[key];
+  session.active = false;
+  if (session.rafId) cancelAnimationFrame(session.rafId);
+  if (session.timerId) clearTimeout(session.timerId);
+
+  const value = average(session.samples);
+  if (value === null) {
+    toast(`No ${PARAM_LABELS[key]} data was captured - make sure the sensor is placed correctly and try again.`, 'error');
+    renderRecordControls(key);
+    updateSaveButtonState();
+    return;
+  }
+
+  recorded[key] = Math.round(value * 10) / 10;
+  toast(`${PARAM_LABELS[key]} recorded.`, 'success');
+  renderRecordControls(key);
+  updateSaveButtonState();
+}
+
+function updateSaveButtonState() {
+  const allDone = Object.keys(RECORD_DURATIONS_MS).every((key) => recorded[key] !== null);
+  el.saveBtn.disabled = !allDone;
+  el.saveBtn.title = allDone ? '' : 'Record every parameter above before saving.';
+}
+
+document.querySelectorAll('.record-controls').forEach((container) => {
+  container.addEventListener('click', (ev) => {
+    const btn = ev.target.closest('[data-record]');
+    if (!btn) return;
+    startRecording(btn.dataset.record);
+  });
+});
+
+for (const key of Object.keys(RECORD_DURATIONS_MS)) {
+  renderRecordControls(key);
+}
+updateSaveButtonState();
+
 // ----- BLE status handling -----
 bleService.onStatusChange = (status) => {
   el.statusDot.className = 'status-dot';
@@ -123,7 +265,7 @@ bleService.onStatusChange = (status) => {
   } else if (status === 'connected') {
     el.statusDot.classList.add('connected');
     el.statusTitle.textContent = 'Connected';
-    el.statusSubtitle.textContent = 'Streaming live vitals from HealthBox.';
+    el.statusSubtitle.textContent = 'Start each test below when you\'re ready.';
     el.connectBtn.hidden = true;
     el.disconnectBtn.hidden = false;
     el.connectBtn.disabled = false;
@@ -147,9 +289,6 @@ function resetConnectUI() {
 
 // ----- Vitals (temp/hr/spo2, ~1Hz) -----
 bleService.onVitals = (reading) => {
-  hasAnyReading = true;
-  el.saveBtn.disabled = false;
-
   latest.temperature = reading.temperature;
   latest.heartRate = reading.heartRate;
   latest.spo2 = reading.spo2;
@@ -165,23 +304,26 @@ bleService.onVitals = (reading) => {
   if (reading.heartRate !== null) pushPoint(charts.hr, reading.heartRate);
   if (reading.spo2 !== null) pushPoint(charts.spo2, reading.spo2);
   if (reading.temperature !== null) pushPoint(charts.temp, reading.temperature);
+
+  if (sessions.temperature.active && reading.temperature !== null) sessions.temperature.samples.push(reading.temperature);
+  if (sessions.heartRate.active && reading.heartRate !== null) sessions.heartRate.samples.push(reading.heartRate);
+  if (sessions.spo2.active && reading.spo2 !== null) sessions.spo2.samples.push(reading.spo2);
 };
 
 // ----- Waveform (ecg/emg sample batches, ~10Hz) -----
 bleService.onWaveform = (batch) => {
-  hasAnyReading = true;
-  el.saveBtn.disabled = false;
-
   if (batch.ecg.length) {
     latest.ecg = batch.ecg[batch.ecg.length - 1];
     document.getElementById('val-ecg').textContent = latest.ecg;
     pushPoints(charts.ecg, batch.ecg);
+    if (sessions.ecg.active) sessions.ecg.samples.push(...batch.ecg);
   }
 
   if (batch.emg.length) {
     latest.emg = batch.emg[batch.emg.length - 1];
     document.getElementById('val-emg').textContent = latest.emg;
     pushPoints(charts.emg, batch.emg);
+    if (sessions.emg.active) sessions.emg.samples.push(...batch.emg);
   }
 };
 
@@ -215,11 +357,11 @@ el.saveBtn.addEventListener('click', async () => {
 
   try {
     const docRef = await addDoc(collection(db, 'users', currentUser.uid, 'checkups'), {
-      temperature: latest.temperature,
-      heartRate: latest.heartRate,
-      spo2: latest.spo2,
-      ecg: latest.ecg,
-      emg: latest.emg,
+      temperature: recorded.temperature,
+      heartRate: recorded.heartRate,
+      spo2: recorded.spo2,
+      ecg: recorded.ecg,
+      emg: recorded.emg,
       bpSystolic: systolic,
       bpDiastolic: diastolic,
       recordedAt: serverTimestamp(),
@@ -227,6 +369,11 @@ el.saveBtn.addEventListener('click', async () => {
     toast('Checkup saved. Analyzing with AI…', 'success');
     el.bpSystolic.value = '';
     el.bpDiastolic.value = '';
+
+    // Reset recorded values so the next checkup starts fresh.
+    for (const key of Object.keys(recorded)) recorded[key] = null;
+    for (const key of Object.keys(RECORD_DURATIONS_MS)) renderRecordControls(key);
+
     requestAiAnalysis(currentUser.uid, docRef.id);
   } catch (err) {
     console.error(err);
@@ -235,7 +382,7 @@ el.saveBtn.addEventListener('click', async () => {
     el.saveBtn.innerHTML = `
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
       Save Checkup`;
-    el.saveBtn.disabled = !hasAnyReading;
+    updateSaveButtonState();
   }
 });
 
