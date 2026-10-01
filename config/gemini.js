@@ -16,7 +16,7 @@ function getClient() {
 // steers the model away from diagnostic claims.
 async function analyzeCheckup(vitals) {
   const genAI = getClient();
-  const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+  const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
 
   const lines = [];
   if (vitals.temperature !== null && vitals.temperature !== undefined) lines.push(`Temperature: ${vitals.temperature} °C`);
