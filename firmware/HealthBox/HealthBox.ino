@@ -8,37 +8,40 @@
   Wiring (per Schematic_health_box_2026-10-01.pdf + confirmed pin mapping):
   ---------------------------------------------------------------------------
     DS18B20 Temperature (OneWire) ..... GPIO23
-    MAX30100 (HR / SpO2) .............. SDA=GPIO18  SCL=GPIO19  (dedicated I2C bus)
-    SSD1306 OLED 128x64 ............... SDA=GPIO21  SCL=GPIO22  (dedicated I2C bus)
+    MAX30100 (HR / SpO2) .............. SDA=GPIO18  SCL=GPIO19
+    SSD1306 OLED 128x64 ............... SDA=GPIO21  SCL=GPIO22
     ECG analog signal (AD8232-style) .. GPIO35 (ADC1_CH7, input-only)
     EMG analog signal ................. GPIO34 (ADC1_CH6, input-only)
     SW1 / SW2 .......................... EN / BOOT (board reset+flash, no firmware handling needed)
 
-  Two separate I2C buses, same principle as a proven working MAX30102
-  reference project on similar ESP32 hardware: one dedicated TwoWire bus
-  per sensor prevents address conflicts and bus-hang resets that occur
-  when sensors share a bus or when a sensor shares the bus a library
-  hardcodes internally. Neither available MAX30100 Arduino library can
-  be pointed at a second bus (both hardcode the global Wire instance in
-  begin()), so the MAX30100 here is driven with a direct-register driver
-  on its own TwoWire(1) bus - confirmed working against this exact chip
-  (part ID reads back correctly, FIFO fills with a real pulsatile
-  waveform) via firmware/MAX30100_Test/MAX30100_Test.ino.
+  The MAX30100 is driven by the real oxullo/Arduino-MAX30100 library
+  (PulseOximeter, MAX30100_PulseOximeter.h), used exactly as tested -
+  no custom register/algorithm code. That library hardcodes the global
+  Wire instance internally, so the global Wire is assigned to the
+  MAX30100 (SDA=18/SCL=19) and the OLED is moved onto its own TwoWire(1)
+  bus (SDA=21/SCL=22) instead. The physical wiring is unchanged - this
+  only swaps which ESP32 I2C peripheral number each sensor uses in code.
 
-  Bus discipline (matches the working MAX30102 reference exactly):
-   - 100kHz clock (not 400kHz - verified to corrupt reads on this board)
-   - Wire.setTimeOut(50) - a stuck bus times out instead of hanging/
-     crashing the whole sketch
-   - I2C address probe BEFORE touching sensor registers, so a missing/
-     mis-wired sensor is skipped cleanly instead of hanging
-   - online-flag guards so the main loop only touches a sensor that
-     actually initialized
+  The library's internal I2C clock is hardcoded to 400kHz, which was
+  confirmed to corrupt reads on this hardware. Fixed by editing the
+  installed library directly: change I2C_BUS_SPEED from 400000UL to
+  100000UL in MAX30100.h (wherever the "MAX30100" library by OXullo
+  Intersecans is installed). Reapply that edit if the library is
+  reinstalled or updated.
 
-  HR (zero-crossing detection on the IR AC signal) and SpO2 (ratio of
-  the Red/IR AC-over-DC ratios, R = (sqrt(sumRedAc)/avgRed) /
-  (sqrt(sumIrAc)/avgIr), mapped through the same -23.3*(R-0.4)+100
-  curve) are computed directly from the raw FIFO samples using the
-  identical formulas as that working reference.
+  No other MAX30100-capable library works here: the SparkFun MAX3010x
+  library (MAX30105.h) does accept a custom TwoWire bus, but its entire
+  register map is shifted for the MAX30102/MAX30105 (e.g. FIFO_DATA at
+  0x07 vs this chip's actual 0x05, MODE_CONFIG at 0x09 vs 0x06) - it's
+  not just a part-ID check, so patching around the ID mismatch would
+  silently read/write the wrong registers. That library is unusable
+  with a true MAX30100 beyond the initial handshake.
+
+  setupBle() runs before the MAX30100 probe (not after) so any timing
+  jitter from BLE radio startup settles before I2C is touched - this
+  firmware previously failed MAX30100 detection intermittently when
+  combined with BLE/OLED even though a standalone sketch (no BLE, no
+  OLED) detected it reliably every time.
 
   ---------------------------------------------------------------------------
   BLE protocol (matches public/js/ble-service.js on the web app):
@@ -56,12 +59,10 @@
     - DallasTemperature
     - Adafruit GFX Library
     - Adafruit SSD1306
+    - MAX30100 (OXullo Intersecans) - provides MAX30100_PulseOximeter.h
   Board core: esp32 by Espressif Systems (BLEDevice.h ships with the core)
   ---------------------------------------------------------------------------
 */
-
-// Uncomment to print raw MAX30100 FIFO/IR/Red values to Serial for debugging.
-#define MAX30100_DEBUG
 
 #include <Wire.h>
 #include <OneWire.h>
@@ -72,6 +73,7 @@
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
+#include <MAX30100_PulseOximeter.h>
 
 // ----------------------------- Pin map -------------------------------------
 #define PIN_TEMP_ONEWIRE   23
@@ -88,49 +90,17 @@
 #define WAVEFORM_CHAR_UUID      "4f3a0003-41a0-4a7a-9e2a-5c6b8f9d0a01"
 #define DEVICE_NAME             "HealthBox"
 
-// ----------------------------- OLED (own dedicated bus, TwoWire 0) ------------------------------------
+// ----------------------------- OLED (own TwoWire(1) bus) ------------------------------------
 #define OLED_WIDTH   128
 #define OLED_HEIGHT  64
 #define OLED_RESET   -1
 #define OLED_ADDR    0x3C
-TwoWire oledWire = TwoWire(0);
+TwoWire oledWire = TwoWire(1);
 Adafruit_SSD1306 display(OLED_WIDTH, OLED_HEIGHT, &oledWire, OLED_RESET);
 
-// ----------------------------- MAX30100 (own dedicated bus, TwoWire 1) ------------------------------------
-#define MAX30100_ADDR                  0x57
-#define MAX30100_REG_INT_STATUS        0x00
-#define MAX30100_REG_INT_ENABLE        0x01
-#define MAX30100_REG_FIFO_WR_PTR       0x02
-#define MAX30100_REG_FIFO_OVF_CTR      0x03
-#define MAX30100_REG_FIFO_RD_PTR       0x04
-#define MAX30100_REG_FIFO_DATA         0x05
-#define MAX30100_REG_MODE_CONFIG       0x06
-#define MAX30100_REG_SPO2_CONFIG       0x07
-#define MAX30100_REG_LED_CONFIG        0x09
-#define MAX30100_REG_PART_ID           0xFF
-#define MAX30100_EXPECTED_PART_ID      0x11
-
-TwoWire maxWire = TwoWire(1);
+// ----------------------------- MAX30100 (library, on the global Wire bus) ------------------------------------
+PulseOximeter pox;
 bool max30100Online = false;
-
-// SpO2 / HR running state - same formulas as the working MAX30102 reference:
-//   DC tracking: avg = avg*frate + sample*(1-frate)
-//   HR: zero-crossing on the IR AC signal
-//   SpO2: R = (sqrt(sumRedAc)/avgRed) / (sqrt(sumIrAc)/avgIr), mapped via -23.3*(R-0.4)+100
-static double avgIr = 0, avgRed = 0;
-static double sumIrAc = 0, sumRedAc = 0;
-static int spo2SampleCount = 0;
-static const double DC_ALPHA = 0.95;
-static const int SPO2_WINDOW = 100;
-static float filteredSpo2 = 98.0;
-static const float SPO2_ALPHA = 0.85;
-
-static float filteredHr = 0;
-static const float HR_ALPHA = 0.30;
-static bool prevIrAcPositive = false;
-static unsigned long lastHrCrossMs = 0;
-
-#define FINGER_PRESENT_THRESHOLD  30000UL
 
 // ----------------------------- Sensors ------------------------------------
 OneWire oneWire(PIN_TEMP_ONEWIRE);
@@ -175,148 +145,13 @@ class ServerCallbacks : public BLEServerCallbacks {
   }
 };
 
-// ----------------------------- MAX30100 register helpers ------------------------------------
-void max30100WriteReg(uint8_t reg, uint8_t value) {
-  maxWire.beginTransmission(MAX30100_ADDR);
-  maxWire.write(reg);
-  maxWire.write(value);
-  maxWire.endTransmission();
-}
-
-uint8_t max30100ReadReg(uint8_t reg) {
-  maxWire.beginTransmission(MAX30100_ADDR);
-  maxWire.write(reg);
-  maxWire.endTransmission(false);
-  maxWire.requestFrom((uint8_t)MAX30100_ADDR, (uint8_t)1);
-  return maxWire.available() ? maxWire.read() : 0;
-}
-
-bool setupMax30100() {
-  // Probe BEFORE touching registers, so a missing/mis-wired sensor is
-  // skipped cleanly instead of hanging (same principle as the MPU6050
-  // probe-before-init step in the reference project).
-  maxWire.beginTransmission(MAX30100_ADDR);
-  if (maxWire.endTransmission() != 0) {
-    Serial.println("MAX30100 not found on I2C bus (SDA=18/SCL=19) - check wiring/power.");
-    return false;
-  }
-
-  uint8_t partId = max30100ReadReg(MAX30100_REG_PART_ID);
-  if (partId != MAX30100_EXPECTED_PART_ID) {
-    Serial.printf("MAX30100 part ID mismatch: got 0x%02X, expected 0x%02X\n", partId, MAX30100_EXPECTED_PART_ID);
-    return false;
-  }
-
-  max30100WriteReg(MAX30100_REG_FIFO_WR_PTR, 0x00);
-  max30100WriteReg(MAX30100_REG_FIFO_OVF_CTR, 0x00);
-  max30100WriteReg(MAX30100_REG_FIFO_RD_PTR, 0x00);
-  max30100WriteReg(MAX30100_REG_SPO2_CONFIG, 0x47);       // hi-res, 100Hz, 1600us pulse
-  max30100WriteReg(MAX30100_REG_LED_CONFIG, 0x2F);        // IR/Red current ~7.6mA each
-  delay(10);
-  max30100WriteReg(MAX30100_REG_MODE_CONFIG, 0x03);       // SpO2 + HR mode, written last so sampling starts after everything else is configured
-  delay(50);
-
-#ifdef MAX30100_DEBUG
-  Serial.printf("[MAX30100] readback MODE_CONFIG=0x%02X SPO2_CONFIG=0x%02X LED_CONFIG=0x%02X\n",
-    max30100ReadReg(MAX30100_REG_MODE_CONFIG),
-    max30100ReadReg(MAX30100_REG_SPO2_CONFIG),
-    max30100ReadReg(MAX30100_REG_LED_CONFIG));
-#endif
-
-  Serial.println("MAX30100 initialized.");
-  return true;
-}
-
-void updateMax30100() {
-  if (!max30100Online) return;
-
-  uint8_t writePtr = max30100ReadReg(MAX30100_REG_FIFO_WR_PTR);
-  uint8_t readPtr = max30100ReadReg(MAX30100_REG_FIFO_RD_PTR);
-  int8_t samplesAvailable = (int8_t)(writePtr - readPtr) & 0x0F;
-
-#ifdef MAX30100_DEBUG
-  static uint32_t lastDebugMs = 0;
-  if (millis() - lastDebugMs > 1000) {
-    lastDebugMs = millis();
-    Serial.printf("[MAX30100] wrPtr=%u rdPtr=%u avail=%d\n", writePtr, readPtr, samplesAvailable);
-  }
-#endif
-
-  for (int8_t i = 0; i < samplesAvailable; i++) {
-    maxWire.beginTransmission(MAX30100_ADDR);
-    maxWire.write(MAX30100_REG_FIFO_DATA);
-    maxWire.endTransmission(false);
-    maxWire.requestFrom((uint8_t)MAX30100_ADDR, (uint8_t)4);
-
-    if (maxWire.available() < 4) break;
-
-    uint16_t irSample = (maxWire.read() << 8) | maxWire.read();
-    uint16_t redSample = (maxWire.read() << 8) | maxWire.read();
-
-#ifdef MAX30100_DEBUG
-    Serial.printf("[MAX30100] ir=%u red=%u\n", irSample, redSample);
-#endif
-
-    bool fingerPresent = irSample > FINGER_PRESENT_THRESHOLD;
-    if (!fingerPresent) {
-      // No finger - reset all accumulators (same as the reference's "else" branch).
-      avgIr = avgRed = sumIrAc = sumRedAc = 0;
-      filteredHr = 0;
-      lastHrCrossMs = 0;
-      continue;
-    }
-
-    double ir = irSample;
-    double red = redSample;
-
-    // DC-level tracking (low-pass IIR).
-    avgIr = avgIr * DC_ALPHA + ir * (1.0 - DC_ALPHA);
-    avgRed = avgRed * DC_ALPHA + red * (1.0 - DC_ALPHA);
-
-    // AC component.
-    double acIr = ir - avgIr;
-    double acRed = red - avgRed;
-
-    // Accumulate RMS sums.
-    sumIrAc += acIr * acIr;
-    sumRedAc += acRed * acRed;
-
-    // Heart rate - rising zero-crossing on IR AC.
-    bool irAcPositive = acIr > 0;
-    if (!prevIrAcPositive && irAcPositive) {
-      unsigned long now = millis();
-      if (lastHrCrossMs > 0) {
-        unsigned long interval = now - lastHrCrossMs;
-        if (interval > 200 && interval < 2000) { // 30-300 BPM
-          float instantHr = 60000.0f / (float)interval;
-          filteredHr = HR_ALPHA * instantHr + (1.0f - HR_ALPHA) * filteredHr;
-        }
-      }
-      lastHrCrossMs = now;
-    }
-    prevIrAcPositive = irAcPositive;
-    if (filteredHr > 0) latestHr = filteredHr;
-
-    spo2SampleCount++;
-    if (spo2SampleCount >= SPO2_WINDOW) {
-      if (avgIr > 0 && avgRed > 0) {
-        double ratio = (sqrt(sumRedAc) / avgRed) / (sqrt(sumIrAc) / avgIr);
-        float rawSpo2 = (float)(-23.3 * (ratio - 0.4) + 100.0);
-        rawSpo2 = constrain(rawSpo2, 70.0f, 100.0f);
-        filteredSpo2 = SPO2_ALPHA * filteredSpo2 + (1.0f - SPO2_ALPHA) * rawSpo2;
-        latestSpo2 = constrain(filteredSpo2, 70.0f, 100.0f);
-      }
-      sumIrAc = 0;
-      sumRedAc = 0;
-      spo2SampleCount = 0;
-    }
-  }
+void onBeatDetected() {
+  Serial.println("[MAX30100] Beat!");
 }
 
 // ----------------------------- Setup ------------------------------------
 void setupOled() {
   oledWire.begin(PIN_OLED_SDA, PIN_OLED_SCL);
-  oledWire.setClock(100000);
   oledWire.setTimeOut(50);
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
     Serial.println("OLED init failed - check wiring/address");
@@ -329,6 +164,33 @@ void setupOled() {
   display.println("HealthBox");
   display.println("Starting...");
   display.display();
+}
+
+#define MAX30100_INIT_ATTEMPTS      6
+#define MAX30100_INIT_RETRY_MS      500
+
+bool setupMax30100() {
+  Wire.begin(PIN_MAX30100_SDA, PIN_MAX30100_SCL);
+
+  // Right after power-on, the MAX30100's internal LDO/oscillator can still be
+  // settling, so the first begin() attempt(s) may fail even though the chip
+  // is fine - a reset button press (no power-cycle) skips this and works on
+  // the first try, which is the symptom this retry loop fixes. Settling is
+  // a one-time condition, so retrying a few times covers it without masking
+  // a genuine wiring/power fault (which will keep failing every attempt).
+  for (uint8_t attempt = 1; attempt <= MAX30100_INIT_ATTEMPTS; attempt++) {
+    if (pox.begin()) {
+      pox.setOnBeatDetectedCallback(onBeatDetected);
+      Serial.printf("MAX30100 initialized (attempt %u/%u).\n", attempt, MAX30100_INIT_ATTEMPTS);
+      return true;
+    }
+    Serial.printf("MAX30100 not found on I2C bus (SDA=18/SCL=19), attempt %u/%u - retrying...\n",
+      attempt, MAX30100_INIT_ATTEMPTS);
+    delay(MAX30100_INIT_RETRY_MS);
+  }
+
+  Serial.println("MAX30100 init failed after all retries - check wiring/power.");
+  return false;
 }
 
 void setupBle() {
@@ -362,36 +224,56 @@ void setupBle() {
 
 void setup() {
   Serial.begin(115200);
-  delay(300);
-  Serial.println("\n=== HealthBox Booting ===");
+  delay(1500); // let I2C bus/sensors fully power up before probing
 
   pinMode(PIN_ECG_ADC, INPUT);
   pinMode(PIN_EMG_ADC, INPUT);
   analogReadResolution(12); // 0-4095
 
-  // Bring up both I2C buses with the same discipline as the working
-  // MAX30102 reference: slow clock + bus timeout BEFORE touching any
-  // sensor, so a missing/mis-wired device can't hang the sketch.
-  oledWire.begin(PIN_OLED_SDA, PIN_OLED_SCL);
-  oledWire.setClock(100000);
-  oledWire.setTimeOut(50);
-
-  maxWire.begin(PIN_MAX30100_SDA, PIN_MAX30100_SCL);
-  maxWire.setClock(100000); // 400kHz corrupts reads on this hardware - confirmed via testing
-  maxWire.setTimeOut(50);
-
   tempSensor.begin();
   setupOled();
 
-  Serial.print("Probing MAX30100... ");
+  // BLE radio startup is initialized before the MAX30100 I2C probe: starting
+  // BLE can introduce brief timing jitter on shared interrupt/RTC resources,
+  // and probing I2C while that's happening was a suspected cause of the
+  // sensor working standalone but failing once BLE/other peripherals were
+  // active. Getting BLE fully up first, then settling briefly, avoids that
+  // window entirely.
+  setupBle();
+  delay(200);
+
   max30100Online = setupMax30100();
 
-  setupBle();
-
-  Serial.println("=== HealthBox ready ===\n");
+  Serial.println("HealthBox ready.");
 }
 
 // ----------------------------- Readers ------------------------------------
+const uint32_t MAX30100_RETRY_INTERVAL_MS = 5000;
+uint32_t lastMax30100RetryMs = 0;
+
+void updateMax30100() {
+  if (!max30100Online) {
+    // Keep retrying in the background instead of requiring a manual reset -
+    // covers the case where the sensor was still settling at boot (or was
+    // unplugged/replugged) and becomes available later.
+    uint32_t now = millis();
+    if (now - lastMax30100RetryMs >= MAX30100_RETRY_INTERVAL_MS) {
+      lastMax30100RetryMs = now;
+      Serial.println("[MAX30100] Retrying init...");
+      max30100Online = pox.begin();
+      if (max30100Online) {
+        pox.setOnBeatDetectedCallback(onBeatDetected);
+        Serial.println("MAX30100 initialized (background retry).");
+      }
+    }
+    return;
+  }
+  pox.update();
+  latestHr = pox.getHeartRate();
+  uint8_t spo2 = pox.getSpO2();
+  if (spo2 > 0) latestSpo2 = spo2;
+}
+
 void updateTemperature() {
   tempSensor.requestTemperatures();
   float c = tempSensor.getTempCByIndex(0);
@@ -421,7 +303,7 @@ void sendVitals() {
   snprintf(json, sizeof(json),
     "{\"temp\":%s,\"hr\":%s,\"spo2\":%s}",
     isnan(latestTemp) ? "null" : String(latestTemp, 1).c_str(),
-    isnan(latestHr) ? "null" : String(latestHr, 0).c_str(),
+    (isnan(latestHr) || latestHr <= 0) ? "null" : String(latestHr, 0).c_str(),
     isnan(latestSpo2) ? "null" : String(latestSpo2, 0).c_str()
   );
 
@@ -463,7 +345,7 @@ void refreshOled() {
 
   if (max30100Online) {
     display.print("HR   : ");
-    display.print(isnan(latestHr) ? "--" : String(latestHr, 0));
+    display.print((isnan(latestHr) || latestHr <= 0) ? "--" : String(latestHr, 0));
     display.println(" bpm");
 
     display.print("SpO2 : ");
@@ -471,7 +353,7 @@ void refreshOled() {
     display.println(" %");
   } else {
     display.println("HR   : sensor offline");
-    display.println("SpO2 : sensor offline");
+    display.println("SpO2 : retrying...");
   }
 
   display.display();
@@ -481,7 +363,7 @@ void refreshOled() {
 void loop() {
   uint32_t now = millis();
 
-  updateMax30100(); // must be called often to drain the FIFO before it overflows
+  updateMax30100(); // pox.update() must be called often to drain the FIFO before it overflows
 
   if (now - lastTempRead >= TEMP_INTERVAL_MS) {
     lastTempRead = now;
