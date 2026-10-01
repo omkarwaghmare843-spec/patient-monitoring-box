@@ -288,6 +288,7 @@ void updateMax30100() {
 // ----------------------------- Setup ------------------------------------
 void setupOled() {
   oledWire.begin(PIN_OLED_SDA, PIN_OLED_SCL);
+  oledWire.setTimeOut(50);
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
     Serial.println("OLED init failed - check wiring/address");
     return;
@@ -339,7 +340,8 @@ void setup() {
   analogReadResolution(12); // 0-4095
 
   maxWire.begin(PIN_MAX30100_SDA, PIN_MAX30100_SCL);
-  maxWire.setClock(400000);
+  maxWire.setClock(100000); // conservative speed; 400kHz was producing noisy/corrupted reads
+  maxWire.setTimeOut(50);   // bus hang -> timeout instead of a hard hang/crash
 
   tempSensor.begin();
   setupOled();
