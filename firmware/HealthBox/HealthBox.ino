@@ -8,8 +8,11 @@
   Wiring (per Schematic_health_box_2026-10-01.pdf + confirmed pin mapping):
   ---------------------------------------------------------------------------
     DS18B20 Temperature (OneWire) ..... GPIO23
-    MAX30100 (HR / SpO2, I2C bus 2) ... SDA=GPIO18  SCL=GPIO19
-    SSD1306 OLED 128x64 (I2C bus 1) ... SDA=GPIO21  SCL=GPIO22
+    MAX30100 (HR / SpO2) + SSD1306 OLED, shared I2C bus .. SDA=GPIO21  SCL=GPIO22
+      (MAX30100lib v1.2.x always uses the default Wire instance internally,
+      so it can't run on a separate TwoWire bus - both devices share this
+      one bus instead, which I2C supports fine since they use different
+      addresses: MAX30100 0x57, SSD1306 0x3C. GPIO18/19 are unused.)
     ECG analog signal (AD8232-style) .. GPIO35 (ADC1_CH7, input-only)
     EMG analog signal ................. GPIO34 (ADC1_CH6, input-only)
     SW1 / SW2 .......................... EN / BOOT (board reset+flash, no firmware handling needed)
@@ -50,10 +53,8 @@
 #define PIN_TEMP_ONEWIRE   23
 #define PIN_ECG_ADC        35
 #define PIN_EMG_ADC        34
-#define PIN_MAX30100_SDA   18
-#define PIN_MAX30100_SCL   19
-#define PIN_OLED_SDA       21
-#define PIN_OLED_SCL       22
+#define PIN_I2C_SDA        21  // shared bus: MAX30100 + SSD1306 OLED
+#define PIN_I2C_SCL        22
 
 // ----------------------------- BLE UUIDs ------------------------------------
 #define SERVICE_UUID            "4f3a0001-41a0-4a7a-9e2a-5c6b8f9d0a01"
@@ -72,8 +73,7 @@ Adafruit_SSD1306 display(OLED_WIDTH, OLED_HEIGHT, &Wire, OLED_RESET);
 OneWire oneWire(PIN_TEMP_ONEWIRE);
 DallasTemperature tempSensor(&oneWire);
 
-TwoWire pulseWire = TwoWire(1); // second I2C bus for MAX30100
-PulseOximeter pox;
+PulseOximeter pox; // shares the default Wire bus with the OLED
 
 // ----------------------------- BLE state ------------------------------------
 BLEServer* bleServer = nullptr;
@@ -116,7 +116,6 @@ class ServerCallbacks : public BLEServerCallbacks {
 
 // ----------------------------- Setup ------------------------------------
 void setupOled() {
-  Wire.begin(PIN_OLED_SDA, PIN_OLED_SCL);
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
     Serial.println("OLED init failed - check wiring/address");
     return;
@@ -131,8 +130,7 @@ void setupOled() {
 }
 
 void setupMax30100() {
-  pulseWire.begin(PIN_MAX30100_SDA, PIN_MAX30100_SCL);
-  if (!pox.begin(&pulseWire)) {
+  if (!pox.begin()) {
     Serial.println("MAX30100 init failed - check wiring");
     return;
   }
@@ -175,6 +173,8 @@ void setup() {
   pinMode(PIN_ECG_ADC, INPUT);
   pinMode(PIN_EMG_ADC, INPUT);
   analogReadResolution(12); // 0-4095
+
+  Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL); // shared bus for OLED + MAX30100
 
   tempSensor.begin();
   setupOled();

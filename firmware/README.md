@@ -9,13 +9,19 @@ over Bluetooth Low Energy.
 | Function                  | ESP32 Pin        | Notes                                   |
 |----------------------------|------------------|------------------------------------------|
 | DS18B20 Temperature        | GPIO23           | OneWire, needs a 4.7kΩ pull-up to 3.3V on data line |
-| MAX30100 (HR / SpO2) SDA   | GPIO18           | Second I2C bus                          |
-| MAX30100 (HR / SpO2) SCL   | GPIO19           | Second I2C bus                          |
-| SSD1306 OLED 128x64 SDA    | GPIO21           | Primary I2C bus                         |
-| SSD1306 OLED 128x64 SCL    | GPIO22           | Primary I2C bus                         |
+| MAX30100 (HR / SpO2) SDA   | GPIO21           | Shared I2C bus with the OLED            |
+| MAX30100 (HR / SpO2) SCL   | GPIO22           | Shared I2C bus with the OLED            |
+| SSD1306 OLED 128x64 SDA    | GPIO21           | Shared I2C bus with MAX30100            |
+| SSD1306 OLED 128x64 SCL    | GPIO22           | Shared I2C bus with MAX30100            |
 | ECG signal (AD8232-style)  | GPIO35           | ADC1 input-only pin                     |
 | EMG signal                 | GPIO34           | ADC1 input-only pin                     |
 | SW1 (EN) / SW2 (BOOT)      | EN / GPIO0       | Board reset + flash mode, no firmware handling needed |
+
+MAX30100 and the OLED share one I2C bus (GPIO21/22) because the installed `MAX30100lib`
+(v1.2.x) always talks to the default `Wire` instance internally and has no option to use a
+second `TwoWire` bus. This is safe since the two devices use different I2C addresses
+(MAX30100 `0x57`, SSD1306 `0x3C`). GPIO18/19 from the original schematic are unused by this
+firmware.
 
 ## Arduino IDE setup
 
