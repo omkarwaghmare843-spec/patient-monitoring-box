@@ -178,8 +178,13 @@ uint8_t max30100ReadReg(uint8_t reg) {
 }
 
 bool setupMax30100() {
-  maxWire.beginTransmission(MAX30100_ADDR);
-  if (maxWire.endTransmission() != 0) {
+  uint8_t probeErr = 1;
+  for (uint8_t attempt = 0; attempt < 3 && probeErr != 0; attempt++) {
+    if (attempt > 0) delay(100);
+    maxWire.beginTransmission(MAX30100_ADDR);
+    probeErr = maxWire.endTransmission();
+  }
+  if (probeErr != 0) {
     Serial.println("MAX30100 not found on I2C bus (SDA=18/SCL=19) - check wiring/power.");
     return false;
   }
@@ -339,7 +344,7 @@ void setupBle() {
 
 void setup() {
   Serial.begin(115200);
-  delay(200);
+  delay(1500); // let I2C bus/sensors fully power up before probing (200ms was too short - MAX30100_Test.ino uses 1500ms and detects the sensor reliably)
 
   pinMode(PIN_ECG_ADC, INPUT);
   pinMode(PIN_EMG_ADC, INPUT);
