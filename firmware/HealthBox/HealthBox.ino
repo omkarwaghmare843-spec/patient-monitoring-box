@@ -8,14 +8,19 @@
   Wiring (per Schematic_health_box_2026-10-01.pdf + confirmed pin mapping):
   ---------------------------------------------------------------------------
     DS18B20 Temperature (OneWire) ..... GPIO23
-    MAX30100 (HR / SpO2) + SSD1306 OLED, shared I2C bus .. SDA=GPIO21  SCL=GPIO22
-      (MAX30100lib v1.2.x always uses the default Wire instance internally,
-      so it can't run on a separate TwoWire bus - both devices share this
-      one bus instead, which I2C supports fine since they use different
-      addresses: MAX30100 0x57, SSD1306 0x3C. GPIO18/19 are unused.)
+    MAX30100 (HR / SpO2) .............. SDA=GPIO18  SCL=GPIO19  (dedicated I2C bus)
+    SSD1306 OLED 128x64 ............... SDA=GPIO21  SCL=GPIO22  (dedicated I2C bus)
     ECG analog signal (AD8232-style) .. GPIO35 (ADC1_CH7, input-only)
     EMG analog signal ................. GPIO34 (ADC1_CH6, input-only)
     SW1 / SW2 .......................... EN / BOOT (board reset+flash, no firmware handling needed)
+
+  The MAX30100 is driven with a small direct-register driver in this sketch
+  instead of the "MAX30100lib" Arduino library, because that library's
+  MAX30100::begin() hardcodes a call to the global Wire instance with no way
+  to pass a custom TwoWire bus - it physically cannot talk to a sensor wired
+  to a second I2C bus. Reading the FIFO and computing HR/SpO2 directly here
+  (zero-crossing HR detection + ratio-of-ratios SpO2, same approach used in
+  a previously working MAX30102 project) avoids that limitation entirely.
 
   ---------------------------------------------------------------------------
   BLE protocol (matches public/js/ble-service.js on the web app):
@@ -31,7 +36,6 @@
   Required libraries (Arduino Library Manager):
     - OneWire
     - DallasTemperature
-    - Adafruit MAX30100 (by OXullo Intersecans - "MAX30100lib")
     - Adafruit GFX Library
     - Adafruit SSD1306
   Board core: esp32 by Espressif Systems (BLEDevice.h ships with the core)
@@ -41,7 +45,6 @@
 #include <Wire.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
-#include <MAX30100_PulseOximeter.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 #include <BLEDevice.h>
@@ -53,8 +56,10 @@
 #define PIN_TEMP_ONEWIRE   23
 #define PIN_ECG_ADC        35
 #define PIN_EMG_ADC        34
-#define PIN_I2C_SDA        21  // shared bus: MAX30100 + SSD1306 OLED
-#define PIN_I2C_SCL        22
+#define PIN_MAX30100_SDA   18
+#define PIN_MAX30100_SCL   19
+#define PIN_OLED_SDA       21
+#define PIN_OLED_SCL       22
 
 // ----------------------------- BLE UUIDs ------------------------------------
 #define SERVICE_UUID            "4f3a0001-41a0-4a7a-9e2a-5c6b8f9d0a01"
@@ -67,13 +72,46 @@
 #define OLED_HEIGHT  64
 #define OLED_RESET   -1
 #define OLED_ADDR    0x3C
-Adafruit_SSD1306 display(OLED_WIDTH, OLED_HEIGHT, &Wire, OLED_RESET);
+TwoWire oledWire = TwoWire(0);
+Adafruit_SSD1306 display(OLED_WIDTH, OLED_HEIGHT, &oledWire, OLED_RESET);
+
+// ----------------------------- MAX30100 direct driver ------------------------------------
+#define MAX30100_ADDR                  0x57
+#define MAX30100_REG_INT_STATUS        0x00
+#define MAX30100_REG_INT_ENABLE        0x01
+#define MAX30100_REG_FIFO_WR_PTR       0x02
+#define MAX30100_REG_FIFO_OVF_CTR      0x03
+#define MAX30100_REG_FIFO_RD_PTR       0x04
+#define MAX30100_REG_FIFO_DATA         0x05
+#define MAX30100_REG_MODE_CONFIG       0x06
+#define MAX30100_REG_SPO2_CONFIG       0x07
+#define MAX30100_REG_LED_CONFIG        0x09
+#define MAX30100_REG_PART_ID           0xFF
+#define MAX30100_EXPECTED_PART_ID      0x11
+
+TwoWire maxWire = TwoWire(1);
+bool max30100Online = false;
+
+// SpO2 / HR running state (same ratio-of-ratios + zero-crossing approach
+// proven on the MAX30102 reference project, adapted for MAX30100's FIFO).
+static double avgIr = 0, avgRed = 0;
+static double sumIrAc = 0, sumRedAc = 0;
+static int spo2SampleCount = 0;
+static const double DC_ALPHA = 0.95;
+static const int SPO2_WINDOW = 100;
+static float filteredSpo2 = 98.0;
+static const float SPO2_ALPHA = 0.85;
+
+static float filteredHr = 0;
+static const float HR_ALPHA = 0.30;
+static bool prevIrAcPositive = false;
+static unsigned long lastHrCrossMs = 0;
+
+#define FINGER_PRESENT_THRESHOLD  20000UL
 
 // ----------------------------- Sensors ------------------------------------
 OneWire oneWire(PIN_TEMP_ONEWIRE);
 DallasTemperature tempSensor(&oneWire);
-
-PulseOximeter pox; // shares the default Wire bus with the OLED
 
 // ----------------------------- BLE state ------------------------------------
 BLEServer* bleServer = nullptr;
@@ -114,8 +152,118 @@ class ServerCallbacks : public BLEServerCallbacks {
   }
 };
 
+// ----------------------------- MAX30100 register helpers ------------------------------------
+void max30100WriteReg(uint8_t reg, uint8_t value) {
+  maxWire.beginTransmission(MAX30100_ADDR);
+  maxWire.write(reg);
+  maxWire.write(value);
+  maxWire.endTransmission();
+}
+
+uint8_t max30100ReadReg(uint8_t reg) {
+  maxWire.beginTransmission(MAX30100_ADDR);
+  maxWire.write(reg);
+  maxWire.endTransmission(false);
+  maxWire.requestFrom((uint8_t)MAX30100_ADDR, (uint8_t)1);
+  return maxWire.available() ? maxWire.read() : 0;
+}
+
+bool setupMax30100() {
+  maxWire.beginTransmission(MAX30100_ADDR);
+  if (maxWire.endTransmission() != 0) {
+    Serial.println("MAX30100 not found on I2C bus (SDA=18/SCL=19) - check wiring/power.");
+    return false;
+  }
+
+  uint8_t partId = max30100ReadReg(MAX30100_REG_PART_ID);
+  if (partId != MAX30100_EXPECTED_PART_ID) {
+    Serial.printf("MAX30100 part ID mismatch: got 0x%02X, expected 0x%02X\n", partId, MAX30100_EXPECTED_PART_ID);
+    return false;
+  }
+
+  max30100WriteReg(MAX30100_REG_MODE_CONFIG, 0x03);       // SpO2 + HR mode
+  max30100WriteReg(MAX30100_REG_SPO2_CONFIG, 0x47);       // hi-res, 100Hz, 1600us pulse
+  max30100WriteReg(MAX30100_REG_LED_CONFIG, 0x2F);        // IR/Red current ~7.6mA each
+  max30100WriteReg(MAX30100_REG_FIFO_WR_PTR, 0x00);
+  max30100WriteReg(MAX30100_REG_FIFO_OVF_CTR, 0x00);
+  max30100WriteReg(MAX30100_REG_FIFO_RD_PTR, 0x00);
+
+  Serial.println("MAX30100 initialized.");
+  return true;
+}
+
+void updateMax30100() {
+  if (!max30100Online) return;
+
+  uint8_t writePtr = max30100ReadReg(MAX30100_REG_FIFO_WR_PTR);
+  uint8_t readPtr = max30100ReadReg(MAX30100_REG_FIFO_RD_PTR);
+  int8_t samplesAvailable = (int8_t)(writePtr - readPtr) & 0x0F;
+
+  for (int8_t i = 0; i < samplesAvailable; i++) {
+    maxWire.beginTransmission(MAX30100_ADDR);
+    maxWire.write(MAX30100_REG_FIFO_DATA);
+    maxWire.endTransmission(false);
+    maxWire.requestFrom((uint8_t)MAX30100_ADDR, (uint8_t)4);
+
+    if (maxWire.available() < 4) break;
+
+    uint16_t irSample = (maxWire.read() << 8) | maxWire.read();
+    uint16_t redSample = (maxWire.read() << 8) | maxWire.read();
+
+    bool fingerPresent = irSample > FINGER_PRESENT_THRESHOLD;
+    if (!fingerPresent) {
+      avgIr = avgRed = sumIrAc = sumRedAc = 0;
+      filteredHr = 0;
+      lastHrCrossMs = 0;
+      continue;
+    }
+
+    double ir = irSample;
+    double red = redSample;
+
+    avgIr = avgIr * DC_ALPHA + ir * (1.0 - DC_ALPHA);
+    avgRed = avgRed * DC_ALPHA + red * (1.0 - DC_ALPHA);
+
+    double acIr = ir - avgIr;
+    double acRed = red - avgRed;
+
+    sumIrAc += acIr * acIr;
+    sumRedAc += acRed * acRed;
+
+    bool irAcPositive = acIr > 0;
+    if (!prevIrAcPositive && irAcPositive) {
+      unsigned long now = millis();
+      if (lastHrCrossMs > 0) {
+        unsigned long interval = now - lastHrCrossMs;
+        if (interval > 200 && interval < 2000) { // 30-300 BPM
+          float instantHr = 60000.0f / (float)interval;
+          filteredHr = HR_ALPHA * instantHr + (1.0f - HR_ALPHA) * filteredHr;
+        }
+      }
+      lastHrCrossMs = now;
+    }
+    prevIrAcPositive = irAcPositive;
+    if (filteredHr > 0) latestHr = filteredHr;
+
+    spo2SampleCount++;
+    if (spo2SampleCount >= SPO2_WINDOW) {
+      if (avgIr > 0 && avgRed > 0) {
+        double ratio = (sqrt(sumRedAc) / avgRed) / (sqrt(sumIrAc) / avgIr);
+        float rawSpo2 = (float)(-23.3 * (ratio - 0.4) + 100.0);
+        rawSpo2 = constrain(rawSpo2, 70.0f, 100.0f);
+        filteredSpo2 = SPO2_ALPHA * filteredSpo2 + (1.0f - SPO2_ALPHA) * rawSpo2;
+        latestSpo2 = constrain(filteredSpo2, 70.0f, 100.0f);
+      }
+      sumIrAc = 0;
+      sumRedAc = 0;
+      spo2SampleCount = 0;
+    }
+  }
+}
+
 // ----------------------------- Setup ------------------------------------
 void setupOled() {
+  oledWire.begin(PIN_OLED_SDA, PIN_OLED_SCL);
   if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR)) {
     Serial.println("OLED init failed - check wiring/address");
     return;
@@ -127,14 +275,6 @@ void setupOled() {
   display.println("HealthBox");
   display.println("Starting...");
   display.display();
-}
-
-void setupMax30100() {
-  if (!pox.begin()) {
-    Serial.println("MAX30100 init failed - check wiring");
-    return;
-  }
-  pox.setIRLedCurrent(MAX30100_LED_CURR_7_6MA);
 }
 
 void setupBle() {
@@ -174,11 +314,12 @@ void setup() {
   pinMode(PIN_EMG_ADC, INPUT);
   analogReadResolution(12); // 0-4095
 
-  Wire.begin(PIN_I2C_SDA, PIN_I2C_SCL); // shared bus for OLED + MAX30100
+  maxWire.begin(PIN_MAX30100_SDA, PIN_MAX30100_SCL);
+  maxWire.setClock(400000);
 
   tempSensor.begin();
   setupOled();
-  setupMax30100();
+  max30100Online = setupMax30100();
   setupBle();
 
   Serial.println("HealthBox ready.");
@@ -191,14 +332,6 @@ void updateTemperature() {
   if (c > -100.0f && c < 125.0f) { // DEVICE_DISCONNECTED_C guard
     latestTemp = c;
   }
-}
-
-void updatePulseOx() {
-  pox.update();
-  float hr = pox.getHeartRate();
-  float spo2 = pox.getSpO2();
-  if (hr > 0) latestHr = hr;
-  if (spo2 > 0) latestSpo2 = spo2;
 }
 
 void sampleWaveform() {
@@ -277,7 +410,7 @@ void refreshOled() {
 void loop() {
   uint32_t now = millis();
 
-  updatePulseOx(); // must be called as often as possible for MAX30100 accuracy
+  updateMax30100(); // must be called often to drain the FIFO before it overflows
 
   if (now - lastTempRead >= TEMP_INTERVAL_MS) {
     lastTempRead = now;

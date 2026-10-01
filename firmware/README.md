@@ -9,19 +9,21 @@ over Bluetooth Low Energy.
 | Function                  | ESP32 Pin        | Notes                                   |
 |----------------------------|------------------|------------------------------------------|
 | DS18B20 Temperature        | GPIO23           | OneWire, needs a 4.7kΩ pull-up to 3.3V on data line |
-| MAX30100 (HR / SpO2) SDA   | GPIO21           | Shared I2C bus with the OLED            |
-| MAX30100 (HR / SpO2) SCL   | GPIO22           | Shared I2C bus with the OLED            |
-| SSD1306 OLED 128x64 SDA    | GPIO21           | Shared I2C bus with MAX30100            |
-| SSD1306 OLED 128x64 SCL    | GPIO22           | Shared I2C bus with MAX30100            |
+| MAX30100 (HR / SpO2) SDA   | GPIO18           | Dedicated I2C bus (ESP32 I2C peripheral #1) |
+| MAX30100 (HR / SpO2) SCL   | GPIO19           | Dedicated I2C bus (ESP32 I2C peripheral #1) |
+| SSD1306 OLED 128x64 SDA    | GPIO21           | Dedicated I2C bus (ESP32 I2C peripheral #0) |
+| SSD1306 OLED 128x64 SCL    | GPIO22           | Dedicated I2C bus (ESP32 I2C peripheral #0) |
 | ECG signal (AD8232-style)  | GPIO35           | ADC1 input-only pin                     |
 | EMG signal                 | GPIO34           | ADC1 input-only pin                     |
 | SW1 (EN) / SW2 (BOOT)      | EN / GPIO0       | Board reset + flash mode, no firmware handling needed |
 
-MAX30100 and the OLED share one I2C bus (GPIO21/22) because the installed `MAX30100lib`
-(v1.2.x) always talks to the default `Wire` instance internally and has no option to use a
-second `TwoWire` bus. This is safe since the two devices use different I2C addresses
-(MAX30100 `0x57`, SSD1306 `0x3C`). GPIO18/19 from the original schematic are unused by this
-firmware.
+MAX30100 and the OLED each get their own I2C bus, matching the original schematic. The
+firmware talks to the MAX30100 with a small direct-register driver built into the sketch
+instead of the `MAX30100lib` Arduino library, because that library's `MAX30100::begin()`
+hardcodes a call to the global `Wire` instance with no way to pass a custom `TwoWire` bus —
+it's physically incapable of talking to a sensor wired to a second I2C bus. The driver reads
+the FIFO directly and computes heart rate (zero-crossing detection on the IR AC signal) and
+SpO2 (ratio-of-ratios of the Red/IR AC-over-DC ratios) itself.
 
 ## Arduino IDE setup
 
@@ -30,12 +32,19 @@ firmware.
 3. Install these libraries via Library Manager:
    - `OneWire` (Paul Stoffregen)
    - `DallasTemperature` (Miles Burton)
-   - `MAX30100lib` (OXullo Intersecans) — provides `MAX30100_PulseOximeter.h`
    - `Adafruit GFX Library`
    - `Adafruit SSD1306`
+
+   (No MAX30100-specific library is needed — the sketch talks to it directly over I2C.)
 4. Open `HealthBox/HealthBox.ino`, select the correct COM port, and upload.
 5. Open Serial Monitor at **115200 baud** to confirm `HealthBox ready.` and check for any
    sensor init warnings (OLED/MAX30100 wiring issues print a message instead of crashing).
+
+If a sensor doesn't show up, flash [I2C_Scanner/I2C_Scanner.ino](I2C_Scanner/I2C_Scanner.ino)
+first — it scans a given SDA/SCL pin pair and prints every I2C address that responds, which
+quickly confirms whether a sensor is even electrically present before digging into firmware
+logic. Edit the `SCAN_SDA`/`SCAN_SCL` defines at the top to check whichever bus you're
+debugging.
 
 ## BLE protocol
 
