@@ -9,36 +9,35 @@ over Bluetooth Low Energy.
 | Function                  | ESP32 Pin        | Notes                                   |
 |----------------------------|------------------|------------------------------------------|
 | DS18B20 Temperature        | GPIO23           | OneWire, needs a 4.7kΩ pull-up to 3.3V on data line |
-| MAX30100 (HR / SpO2) SDA   | GPIO18           | Dedicated I2C bus (ESP32 I2C peripheral #1) |
-| MAX30100 (HR / SpO2) SCL   | GPIO19           | Dedicated I2C bus (ESP32 I2C peripheral #1) |
-| SSD1306 OLED 128x64 SDA    | GPIO21           | Dedicated I2C bus (ESP32 I2C peripheral #0) |
-| SSD1306 OLED 128x64 SCL    | GPIO22           | Dedicated I2C bus (ESP32 I2C peripheral #0) |
+| MAX30100 (HR / SpO2) SDA   | GPIO18           | Global `Wire` bus (required by the MAX30100 library) |
+| MAX30100 (HR / SpO2) SCL   | GPIO19           | Global `Wire` bus (required by the MAX30100 library) |
+| SSD1306 OLED 128x64 SDA    | GPIO21           | Dedicated `TwoWire(1)` bus              |
+| SSD1306 OLED 128x64 SCL    | GPIO22           | Dedicated `TwoWire(1)` bus              |
 | ECG signal (AD8232-style)  | GPIO35           | ADC1 input-only pin                     |
 | EMG signal                 | GPIO34           | ADC1 input-only pin                     |
 | SW1 (EN) / SW2 (BOOT)      | EN / GPIO0       | Board reset + flash mode, no firmware handling needed |
 
-MAX30100 and the OLED each get their own I2C bus, matching the original schematic. The
-firmware talks to the MAX30100 through a small **direct-register driver built into the sketch**,
-not an Arduino library:
-- `MAX30100lib`'s `MAX30100::begin()` hardcodes the global `Wire` instance and can never talk
-  to a sensor wired to a second I2C bus.
-- The SparkFun MAX3010x library (`MAX30105.h`) does support a custom `TwoWire` bus, but its
-  register map/init sequence targets the MAX30102/MAX30105 and failed `begin()` against this
-  board's actual MAX30100 chip during testing ("MAX30100 not found on I2C bus").
+Physical wiring is unchanged from the schematic (MAX30100 on 18/19, OLED on 21/22) — only
+which ESP32 I2C peripheral number each sensor uses in code has changed.
 
-Heart rate and SpO2 are computed with the same algorithm as the
-**[oxullo/Arduino-MAX30100](https://github.com/oxullo/Arduino-MAX30100)** library (DC remover +
-1-pole Butterworth low-pass + beat-detector state machine + log-ratio SpO2 lookup table),
-ported directly into this sketch since that library can't target a second I2C bus on its own.
-It was validated standalone first via [MAX30100_Test](MAX30100_Test/MAX30100_Test.ino) (that
-library installed on the global bus), which produced steady ~60-85 bpm HR and ~94-97% SpO2
-readings — confirming both the sensor and the algorithm before porting.
+The firmware drives the MAX30100 with the real
+**[oxullo/Arduino-MAX30100](https://github.com/oxullo/Arduino-MAX30100)** library
+(`PulseOximeter`, `MAX30100_PulseOximeter.h`) exactly as published, with no custom
+register/algorithm code. That library hardcodes the **global `Wire`** instance internally and
+cannot be pointed at a second I2C bus, so the global `Wire` is assigned to the MAX30100 here,
+and the OLED — which would normally sit on the global bus — is moved onto its own `TwoWire(1)`
+instead (`Adafruit_SSD1306` supports a custom `TwoWire` pointer, so this needed no OLED logic
+changes).
 
-One bug surfaced during that validation worth knowing about if you ever reinstall the
-`MAX30100` library: `MAX30100.h` hardcodes its I2C clock to 400kHz in `begin()`, which corrupts
-reads on this hardware (same root cause as the earlier direct-driver crash). It was patched to
-100kHz directly in the installed library file — not an issue for `HealthBox.ino`, which sets
-its own dedicated bus to 100kHz already.
+This setup was validated with [MAX30100_Test](MAX30100_Test/MAX30100_Test.ino) first (same
+library, same bus role), producing steady ~60-85 bpm HR and ~94-97% SpO2 readings with a finger
+on the sensor.
+
+**Known library bug, already patched locally:** `MAX30100.h` hardcodes its internal I2C clock
+to 400kHz in `begin()`, which corrupts reads on this hardware. Fixed by editing the installed
+library file directly — change `I2C_BUS_SPEED` from `400000UL` to `100000UL` in `MAX30100.h`
+wherever the `MAX30100` library (OXullo Intersecans) is installed. Reapply this one-line edit
+if the library is ever reinstalled or updated.
 
 ## Arduino IDE setup
 
@@ -49,7 +48,7 @@ its own dedicated bus to 100kHz already.
    - `DallasTemperature` (Miles Burton)
    - `Adafruit GFX Library`
    - `Adafruit SSD1306`
-   - `MAX30100` (OXullo Intersecans) — only needed for `MAX30100_Test.ino`, not `HealthBox.ino`
+   - `MAX30100` (OXullo Intersecans) — remember to patch `I2C_BUS_SPEED` to `100000UL` (see above)
 4. Open `HealthBox/HealthBox.ino`, select the correct COM port, and upload.
 5. Open Serial Monitor at **115200 baud** to confirm `HealthBox ready.` and check for any
    sensor init warnings (OLED/MAX30100 wiring issues print a message instead of crashing).
