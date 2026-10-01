@@ -18,12 +18,19 @@ over Bluetooth Low Energy.
 | SW1 (EN) / SW2 (BOOT)      | EN / GPIO0       | Board reset + flash mode, no firmware handling needed |
 
 MAX30100 and the OLED each get their own I2C bus, matching the original schematic. The
-firmware talks to the MAX30100 with a small direct-register driver built into the sketch
-instead of the `MAX30100lib` Arduino library, because that library's `MAX30100::begin()`
-hardcodes a call to the global `Wire` instance with no way to pass a custom `TwoWire` bus —
-it's physically incapable of talking to a sensor wired to a second I2C bus. The driver reads
-the FIFO directly and computes heart rate (zero-crossing detection on the IR AC signal) and
-SpO2 (ratio-of-ratios of the Red/IR AC-over-DC ratios) itself.
+firmware talks to the MAX30100 through the **SparkFun MAX3010x Pulse and Proximity Sensor
+Library** (`MAX30105.h`), whose `begin()` accepts a custom `TwoWire` bus — unlike the
+`MAX30100lib` Arduino library, whose `MAX30100::begin()` hardcodes the global `Wire` instance
+and can never talk to a sensor wired to a second I2C bus. Heart rate (zero-crossing detection
+on the IR AC signal) and SpO2 (ratio-of-ratios of the Red/IR AC-over-DC ratios) are computed
+directly from the library's raw FIFO samples (`getFIFOIR()`/`getFIFORed()`), the same approach
+proven working on a reference MAX30102 project using this library.
+
+Note: this library's register map was originally written for the MAX30102/MAX30105, which is
+similar but not identical to the MAX30100. If HR/SpO2 still don't populate after installing
+it, that's the most likely explanation — see [MAX30100_Test](MAX30100_Test/MAX30100_Test.ino)
+for a standalone diagnostic sketch that talks to the MAX30100 directly via raw registers to
+confirm the chip and bus are healthy independent of any library.
 
 ## Arduino IDE setup
 
@@ -32,10 +39,9 @@ SpO2 (ratio-of-ratios of the Red/IR AC-over-DC ratios) itself.
 3. Install these libraries via Library Manager:
    - `OneWire` (Paul Stoffregen)
    - `DallasTemperature` (Miles Burton)
+   - `SparkFun MAX3010x Pulse and Proximity Sensor Library` (provides `MAX30105.h`)
    - `Adafruit GFX Library`
    - `Adafruit SSD1306`
-
-   (No MAX30100-specific library is needed — the sketch talks to it directly over I2C.)
 4. Open `HealthBox/HealthBox.ino`, select the correct COM port, and upload.
 5. Open Serial Monitor at **115200 baud** to confirm `HealthBox ready.` and check for any
    sensor init warnings (OLED/MAX30100 wiring issues print a message instead of crashing).
