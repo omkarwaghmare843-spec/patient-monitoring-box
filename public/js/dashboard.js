@@ -33,10 +33,18 @@ const el = {
   statusSubtitle: document.getElementById('statusSubtitle'),
   connectBtn: document.getElementById('connectBtn'),
   disconnectBtn: document.getElementById('disconnectBtn'),
+  simulateBtn: document.getElementById('simulateBtn'),
   saveBtn: document.getElementById('saveBtn'),
   bpSystolic: document.getElementById('bpSystolic'),
   bpDiastolic: document.getElementById('bpDiastolic'),
 };
+
+// Dev-only: lets the full record -> save -> AI flow be tested without real
+// ESP32 hardware. Only shown on localhost so it never appears in production.
+const IS_LOCALHOST = ['localhost', '127.0.0.1'].includes(location.hostname);
+if (IS_LOCALHOST) {
+  el.simulateBtn.hidden = false;
+}
 
 let currentUser = null;
 
@@ -269,6 +277,7 @@ bleService.onStatusChange = (status) => {
     el.connectBtn.hidden = true;
     el.disconnectBtn.hidden = false;
     el.connectBtn.disabled = false;
+    if (IS_LOCALHOST) el.simulateBtn.hidden = true;
   } else if (status === 'error') {
     el.statusDot.classList.add('error');
     el.statusTitle.textContent = 'Connection Error';
@@ -285,6 +294,7 @@ function resetConnectUI() {
   el.connectBtn.hidden = false;
   el.connectBtn.disabled = false;
   el.disconnectBtn.hidden = true;
+  if (IS_LOCALHOST) el.simulateBtn.hidden = false;
 }
 
 // ----- Vitals (temp/hr/spo2, ~1Hz) -----
@@ -344,6 +354,13 @@ el.connectBtn.addEventListener('click', async () => {
 el.disconnectBtn.addEventListener('click', () => {
   bleService.disconnect();
 });
+
+if (IS_LOCALHOST) {
+  el.simulateBtn.addEventListener('click', async () => {
+    const deviceName = await bleService.simulate();
+    toast(`${deviceName} (fake data for testing)`, 'success');
+  });
+}
 
 // ----- Save checkup to Firestore -----
 el.saveBtn.addEventListener('click', async () => {

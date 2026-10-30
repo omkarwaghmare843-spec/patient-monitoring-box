@@ -65,11 +65,56 @@ class BleService {
   }
 
   disconnect() {
+    if (this._simInterval) {
+      clearInterval(this._simInterval);
+      this._simInterval = null;
+      this._setStatus('disconnected');
+      return;
+    }
     if (this.device && this.device.gatt.connected) {
       this.device.gatt.disconnect();
     } else {
       this._setStatus('disconnected');
     }
+  }
+
+  // Dev-only fake data source so the full record -> save -> AI flow can be
+  // tested without real ESP32 hardware. Never used in production - gated by
+  // the caller to localhost only. Produces the same onVitals/onWaveform
+  // shape as a real device so nothing downstream needs to know the
+  // difference.
+  simulate() {
+    this._setStatus('connecting');
+    setTimeout(() => {
+      this._setStatus('connected');
+
+      let t = 0;
+      this._simInterval = setInterval(() => {
+        t += 0.1;
+
+        if (this.onVitals) {
+          this.onVitals({
+            temperature: Math.round((36.8 + Math.sin(t / 10) * 0.2) * 10) / 10,
+            heartRate: Math.round(75 + Math.sin(t / 3) * 6),
+            spo2: Math.round(97 + Math.sin(t / 7)),
+            timestamp: Date.now(),
+          });
+        }
+
+        if (this.onWaveform) {
+          const ecg = [];
+          const emg = [];
+          for (let i = 0; i < 10; i++) {
+            const phase = t + i * 0.01;
+            ecg.push(Math.round(2048 + Math.sin(phase * 8) * 300 + (Math.sin(phase * 60) > 0.97 ? 600 : 0)));
+            emg.push(Math.round(2048 + (Math.random() - 0.5) * 400));
+          }
+          this.onWaveform({ ecg, emg, timestamp: Date.now() });
+        }
+      }, 100);
+    }, 500);
+
+    return Promise.resolve('Simulated HealthBox');
   }
 
   _handleDisconnect() {
