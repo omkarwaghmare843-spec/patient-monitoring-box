@@ -11,10 +11,17 @@ function getClient() {
   return client;
 }
 
-// Gemini's exact model names get deprecated/renamed over time (this project has
-// already hit that twice). Falling through a short list of current flash models
-// means one deprecation doesn't silently break AI insights again.
-const MODEL_CANDIDATES = ['gemini-flash-latest', 'gemini-2.5-flash', 'gemini-2.0-flash'];
+// Confirmed working via a direct API test: gemini-2.5-flash returns a correct
+// response for this exact prompt shape. It can occasionally return a transient
+// 503 ("high demand") - retried below instead of switching models, since this
+// is the model to use per explicit instruction.
+const MODEL_NAME = 'gemini-2.5-flash';
+const MAX_ATTEMPTS = 3;
+const RETRY_DELAY_MS = 1000;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 // Builds a short, plain-language wellness note from one checkup's readings.
 // This is an at-home screening aid, not a diagnosis - the prompt explicitly
@@ -46,19 +53,21 @@ Write a short (3-4 sentences, plain language, no markdown) wellness note for the
 - Always end by reminding them this is not a medical diagnosis and a doctor should be consulted for any concerning or persistent readings.
 - Do not use alarming language. Do not diagnose a condition by name.`;
 
+  const model = genAI.getGenerativeModel({ model: MODEL_NAME });
+
   let lastErr = null;
-  for (const modelName of MODEL_CANDIDATES) {
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {
-      const model = genAI.getGenerativeModel({ model: modelName });
       const result = await model.generateContent(prompt);
       const text = result.response.text().trim();
       return text || 'AI analysis did not return a result for this checkup.';
     } catch (err) {
       lastErr = err;
-      console.error(`Gemini model "${modelName}" failed: ${err.message}`);
+      console.error(`Gemini request failed (attempt ${attempt}/${MAX_ATTEMPTS}): ${err.message}`);
+      if (attempt < MAX_ATTEMPTS) await sleep(RETRY_DELAY_MS * attempt);
     }
   }
-  throw lastErr || new Error('All Gemini model candidates failed.');
+  throw lastErr;
 }
 
 module.exports = { analyzeCheckup };
